@@ -91,7 +91,10 @@ pub mod modifiers {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     /// Absolute cursor position, normalized to `0..=65535`.
-    MouseMove { x: u16, y: u16 },
+    MouseMove {
+        x: u16,
+        y: u16,
+    },
     /// Button edge with the position snapshot taken at press/release time so the
     /// click cannot land somewhere else if a move is still in flight.
     MouseButton {
@@ -100,7 +103,10 @@ pub enum InputEvent {
         x: u16,
         y: u16,
     },
-    MouseWheel { dx: i16, dy: i16 },
+    MouseWheel {
+        dx: i16,
+        dy: i16,
+    },
     Key {
         code: u32,
         down: bool,
@@ -120,7 +126,11 @@ pub enum InputEvent {
 pub enum InputError {
     Empty,
     UnknownOpcode(u8),
-    Truncated { opcode: u8, needed: usize, got: usize },
+    Truncated {
+        opcode: u8,
+        needed: usize,
+        got: usize,
+    },
     InvalidUtf8,
     UnknownButton(u8),
 }
@@ -134,7 +144,10 @@ impl fmt::Display for InputError {
                 opcode,
                 needed,
                 got,
-            } => write!(f, "input opcode {opcode:#04x} needs {needed} bytes, got {got}"),
+            } => write!(
+                f,
+                "input opcode {opcode:#04x} needs {needed} bytes, got {got}"
+            ),
             InputError::InvalidUtf8 => f.write_str("input text is not valid UTF-8"),
             InputError::UnknownButton(b) => write!(f, "unknown mouse button {b}"),
         }
@@ -146,10 +159,7 @@ impl std::error::Error for InputError {}
 impl InputEvent {
     /// True when the event must travel on the reliable channel.
     pub fn is_reliable(&self) -> bool {
-        match self {
-            InputEvent::MouseMove { .. } | InputEvent::Pad(_) => false,
-            _ => true,
-        }
+        !matches!(self, InputEvent::MouseMove { .. } | InputEvent::Pad(_))
     }
 
     /// Serializes the event into `out`. Returns the number of bytes written.
@@ -161,12 +171,7 @@ impl InputEvent {
                 out.extend_from_slice(&x.to_be_bytes());
                 out.extend_from_slice(&y.to_be_bytes());
             }
-            InputEvent::MouseButton {
-                button,
-                down,
-                x,
-                y,
-            } => {
+            InputEvent::MouseButton { button, down, x, y } => {
                 out.push(opcode::MOUSE_BUTTON);
                 out.push(*button as u8);
                 out.push(u8::from(*down));
@@ -239,7 +244,8 @@ impl InputEvent {
             }
             opcode::MOUSE_BUTTON => {
                 need(6)?;
-                let button = MouseButton::from_u8(rest[0]).ok_or(InputError::UnknownButton(rest[0]))?;
+                let button =
+                    MouseButton::from_u8(rest[0]).ok_or(InputError::UnknownButton(rest[0]))?;
                 Ok(InputEvent::MouseButton {
                     button,
                     down: rest[1] != 0,

@@ -183,6 +183,10 @@ impl Viewport {
     /// Anything at or above 50 is treated as the smooth tier so that a device
     /// reporting a 120 Hz display still gets a predictable 60 fps stream.
     pub fn frame_rate_tier(&self) -> u32 {
-        if self.fps >= 50 { 60 } else { 45 }
+        if self.fps >= 50 {
+            60
+        } else {
+            45
+        }
     }
 }

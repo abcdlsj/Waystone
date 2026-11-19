@@ -13,13 +13,6 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use waystone_proto::Viewport;
 use waystone_rtc::engine::{sink, Engine, EngineConfig, Event, Role, SessionOptions};
 
-#[derive(Debug, Clone)]
-enum Signal {
-    Offer(String),
-    Answer(String),
-    Candidate,
-}
-
 /// Starts an engine whose events are forwarded into a channel.
 async fn start(role: Role, relayed_events: UnboundedSender<Event>) -> Engine {
     let sink = sink(move |event: Event| {
@@ -41,11 +34,7 @@ async fn start(role: Role, relayed_events: UnboundedSender<Event>) -> Engine {
 }
 
 /// Waits for the next event matching `predicate`.
-async fn wait_for<F>(
-    events: &mut UnboundedReceiver<Event>,
-    what: &str,
-    mut predicate: F,
-) -> Event
+async fn wait_for<F>(events: &mut UnboundedReceiver<Event>, what: &str, mut predicate: F) -> Event
 where
     F: FnMut(&Event) -> bool,
 {
@@ -55,7 +44,10 @@ where
         assert!(!remaining.is_zero(), "timed out waiting for {what}");
         match tokio::time::timeout(remaining, events.recv()).await {
             Ok(Some(event)) if predicate(&event) => return event,
-            Ok(Some(other)) => { eprintln!("[{what}] skipped: {other:?}"); continue },
+            Ok(Some(other)) => {
+                eprintln!("[{what}] skipped: {other:?}");
+                continue;
+            }
             Ok(None) => panic!("event channel closed while waiting for {what}"),
             Err(_) => panic!("timed out waiting for {what}"),
         }
@@ -148,9 +140,9 @@ async fn session_negotiates_and_carries_media() {
     let annex_b_keyframe = {
         let mut frame = Vec::new();
         for (nal_type, payload) in [
-            (32u8, &[0x0c, 0x01, 0xff][..]), // VPS
-            (33u8, &[0x0c, 0x01, 0xff][..]), // SPS
-            (34u8, &[0x0c, 0x01, 0xff][..]), // PPS
+            (32u8, &[0x0c, 0x01, 0xff][..]),       // VPS
+            (33u8, &[0x0c, 0x01, 0xff][..]),       // SPS
+            (34u8, &[0x0c, 0x01, 0xff][..]),       // PPS
             (19u8, &[0xaa, 0xbb, 0xcc, 0xdd][..]), // IDR_W_RADL
         ] {
             frame.extend_from_slice(&[0, 0, 0, 1]);

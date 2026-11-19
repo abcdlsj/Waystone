@@ -4,6 +4,10 @@
 //! certificate, exactly like the phone does: pair with a token, authenticate with
 //! an Ed25519 signature, then open a session between two devices.
 
+// The port lock is held across awaits on purpose: it serializes the tests that
+// bind a real TCP port.
+#![allow(clippy::await_holding_lock)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,11 +64,9 @@ impl TestServer {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let instance = Instance::load_or_create(
-            &dir,
-            &["localhost".to_string(), "127.0.0.1".to_string()],
-        )
-        .unwrap();
+        let instance =
+            Instance::load_or_create(&dir, &["localhost".to_string(), "127.0.0.1".to_string()])
+                .unwrap();
 
         let store = Arc::new(Store::open(Store::default_path(&dir)).unwrap());
         {
@@ -80,7 +82,7 @@ impl TestServer {
         drop(probe);
 
         let endpoint = format!("127.0.0.1:{}", addr.port());
-        let turn = format!("127.0.0.1:3478");
+        let turn = String::from("127.0.0.1:3478");
         let state = AppState {
             store: store.clone(),
             hub: Hub::new(instance.server_id.clone(), store.clone()),
@@ -127,15 +129,11 @@ impl TestServer {
         &self,
     ) -> (
         futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<TcpStream>,
-            >,
+            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
             tokio_tungstenite::tungstenite::Message,
         >,
         futures_util::stream::SplitStream<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<TcpStream>,
-            >,
+            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
         >,
     ) {
         let stream = TcpStream::connect(self.addr).await.unwrap();
@@ -153,8 +151,14 @@ impl TestServer {
     }
 
     fn pairing_uri(&self, role: Role) -> PairingUri {
-        waystoned::pairing::create(&self.store, &self.endpoint, &self.turn, &self.fingerprint, role)
-            .unwrap()
+        waystoned::pairing::create(
+            &self.store,
+            &self.endpoint,
+            &self.turn,
+            &self.fingerprint,
+            role,
+        )
+        .unwrap()
     }
 }
 
@@ -194,13 +198,20 @@ impl Client {
 
 async fn next_message<S>(stream: &mut S) -> ServerMessage
 where
-    S: StreamExt<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
+    S: StreamExt<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
 {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "timed out waiting for a server message");
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for a server message"
+        );
         match tokio::time::timeout(remaining, stream.next()).await {
             Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) => {
                 return ServerMessage::from_json(&text).expect("server message parses")
@@ -223,7 +234,9 @@ async fn pairing_auth_and_session_flow() {
     let uri = server.pairing_uri(Role::Host);
     let (mut host_tx, mut host_rx) = server.connect().await;
     let challenge = match next_message(&mut host_rx).await {
-        ServerMessage::Challenge { nonce, server_id, .. } => Challenge { nonce, server_id },
+        ServerMessage::Challenge {
+            nonce, server_id, ..
+        } => Challenge { nonce, server_id },
         other => panic!("expected a challenge, got {other:?}"),
     };
     let mut host_info = host.info.clone();
@@ -248,7 +261,9 @@ async fn pairing_auth_and_session_flow() {
     let _ = challenge;
     let (mut host_tx2, mut host_rx2) = server.connect().await;
     let challenge = match next_message(&mut host_rx2).await {
-        ServerMessage::Challenge { nonce, server_id, .. } => Challenge { nonce, server_id },
+        ServerMessage::Challenge {
+            nonce, server_id, ..
+        } => Challenge { nonce, server_id },
         other => panic!("expected a challenge, got {other:?}"),
     };
     host_tx2
@@ -292,7 +307,9 @@ async fn pairing_auth_and_session_flow() {
 
     let (mut controller_tx, mut controller_rx) = server.connect().await;
     let challenge = match next_message(&mut controller_rx).await {
-        ServerMessage::Challenge { nonce, server_id, .. } => Challenge { nonce, server_id },
+        ServerMessage::Challenge {
+            nonce, server_id, ..
+        } => Challenge { nonce, server_id },
         other => panic!("expected a challenge, got {other:?}"),
     };
     controller_tx
@@ -346,7 +363,9 @@ async fn pairing_auth_and_session_flow() {
             // A peer update may be queued between the two messages.
             ServerMessage::PeerUpdate { .. } => continue,
             ServerMessage::SessionAccepted {
-                session_id, is_host, ..
+                session_id,
+                is_host,
+                ..
             } => {
                 assert!(!is_host);
                 break session_id;
@@ -443,7 +462,9 @@ async fn rejects_a_forged_signature() {
 
     let (mut tx, mut rx) = server.connect().await;
     let challenge = match next_message(&mut rx).await {
-        ServerMessage::Challenge { nonce, server_id, .. } => Challenge { nonce, server_id },
+        ServerMessage::Challenge {
+            nonce, server_id, ..
+        } => Challenge { nonce, server_id },
         other => panic!("expected a challenge, got {other:?}"),
     };
     // Sign with a different key than the one that was paired.

@@ -186,12 +186,7 @@ impl Hub {
         self.inner.lock().unwrap().peers.len()
     }
 
-    fn handle_pair(
-        &self,
-        connection_id: u64,
-        token: &str,
-        mut device: DeviceInfo,
-    ) -> Result<()> {
+    fn handle_pair(&self, connection_id: u64, token: &str, mut device: DeviceInfo) -> Result<()> {
         if device.public_key.is_empty() || device.name.is_empty() {
             return self.reject_pair(connection_id, "device description is incomplete");
         }
@@ -273,8 +268,11 @@ impl Hub {
             return self.reject_auth(connection_id, "signature is not valid base64".to_string());
         };
 
-        if !crate::challenge::verify(&stored.public_key, &challenge.signing_payload(), &signature_bytes)
-        {
+        if !crate::challenge::verify(
+            &stored.public_key,
+            &challenge.signing_payload(),
+            &signature_bytes,
+        ) {
             warn!("rejected bad signature from {}", identity.id);
             return self.reject_auth(connection_id, "signature verification failed".to_string());
         }
@@ -436,12 +434,7 @@ impl Hub {
         }
     }
 
-    fn relay(
-        &self,
-        connection_id: u64,
-        session_id: &str,
-        message: ServerMessage,
-    ) -> Result<()> {
+    fn relay(&self, connection_id: u64, session_id: &str, message: ServerMessage) -> Result<()> {
         let inner = self.inner.lock().unwrap();
         let Some(session) = inner.sessions.get(session_id) else {
             return Ok(());

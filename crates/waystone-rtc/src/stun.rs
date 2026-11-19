@@ -357,7 +357,11 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
 
 fn encode_type(method: u16, class: u16) -> u16 {
     let m = method;
-    (m & 0x000F) | ((m & 0x0070) << 1) | ((m & 0x0F80) << 2) | ((class & 0x1) << 4) | ((class & 0x2) << 7)
+    (m & 0x000F)
+        | ((m & 0x0070) << 1)
+        | ((m & 0x0F80) << 2)
+        | ((class & 0x1) << 4)
+        | ((class & 0x2) << 7)
 }
 
 fn decode_address(value: &[u8], xored: bool) -> Result<SocketAddr, StunError> {
@@ -365,7 +369,12 @@ fn decode_address(value: &[u8], xored: bool) -> Result<SocketAddr, StunError> {
         return Err(StunError::Short);
     }
     let family = value[1];
-    let port = read_u16(&value[2..4]) ^ if xored { (MAGIC_COOKIE >> 16) as u16 } else { 0 };
+    let port = read_u16(&value[2..4])
+        ^ if xored {
+            (MAGIC_COOKIE >> 16) as u16
+        } else {
+            0
+        };
     let ip: IpAddr = match family {
         0x01 => {
             if value.len() < 8 {
@@ -408,7 +417,12 @@ fn encode_address(address: SocketAddr, xored: bool) -> Vec<u8> {
     match address.ip() {
         IpAddr::V4(ip) => {
             out.push(0x01);
-            let port = address.port() ^ if xored { (MAGIC_COOKIE >> 16) as u16 } else { 0 };
+            let port = address.port()
+                ^ if xored {
+                    (MAGIC_COOKIE >> 16) as u16
+                } else {
+                    0
+                };
             out.extend_from_slice(&port.to_be_bytes());
             let mut octets = ip.octets();
             if xored {
@@ -421,7 +435,12 @@ fn encode_address(address: SocketAddr, xored: bool) -> Vec<u8> {
         }
         IpAddr::V6(ip) => {
             out.push(0x02);
-            let port = address.port() ^ if xored { (MAGIC_COOKIE >> 16) as u16 } else { 0 };
+            let port = address.port()
+                ^ if xored {
+                    (MAGIC_COOKIE >> 16) as u16
+                } else {
+                    0
+                };
             out.extend_from_slice(&port.to_be_bytes());
             let mut octets = ip.octets();
             if xored {
@@ -446,7 +465,9 @@ fn read_u32(bytes: &[u8]) -> u32 {
 }
 
 fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string()
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches('\0')
+        .to_string()
 }
 
 #[cfg(test)]

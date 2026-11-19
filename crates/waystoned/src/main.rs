@@ -81,7 +81,10 @@ async fn main() -> Result<()> {
     }
 
     let instance = Instance::load_or_create(&args.data_dir, &hostnames)?;
-    info!("instance {} fingerprint {}", instance.server_id, instance.fingerprint);
+    info!(
+        "instance {} fingerprint {}",
+        instance.server_id, instance.fingerprint
+    );
 
     let store = Arc::new(Store::open(Store::default_path(&args.data_dir))?);
     {

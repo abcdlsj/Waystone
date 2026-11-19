@@ -50,7 +50,10 @@ fn main() {
         .env("CLANG_MODULE_CACHE_PATH", &module_cache)
         .status()
         .expect("swiftc must be available on a macOS build machine");
-    assert!(status.success(), "swiftc failed to compile the capture layer");
+    assert!(
+        status.success(),
+        "swiftc failed to compile the capture layer"
+    );
 
     let status = Command::new("libtool")
         .args(["-static", "-o"])
@@ -58,7 +61,10 @@ fn main() {
         .arg(&object)
         .status()
         .expect("libtool must be available on a macOS build machine");
-    assert!(status.success(), "libtool failed to archive the capture layer");
+    assert!(
+        status.success(),
+        "libtool failed to archive the capture layer"
+    );
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=waystone_capture");

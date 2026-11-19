@@ -50,8 +50,8 @@ impl Store {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let connection = Connection::open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let connection =
+            Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         // Write ahead logging keeps the daemon responsive while a phone syncs.
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -128,20 +128,20 @@ impl Store {
 
     /// The instance id used inside challenge signatures.
     pub fn server_id(&self) -> Result<String> {
-        Ok(self.lock()
+        self.lock()
             .query_row("SELECT server_id FROM instance WHERE id = 1", [], |row| {
                 row.get::<_, String>(0)
             })
-            .context("instance row is missing")?)
+            .context("instance row is missing")
     }
 
     /// The pinned certificate fingerprint.
     pub fn fingerprint(&self) -> Result<String> {
-        Ok(self.lock()
+        self.lock()
             .query_row("SELECT fingerprint FROM instance WHERE id = 1", [], |row| {
                 row.get::<_, String>(0)
             })
-            .context("instance row is missing")?)
+            .context("instance row is missing")
     }
 
     /// Hashes and stores the admin password. Only the hash is persisted.
@@ -155,10 +155,13 @@ impl Store {
 
     /// The stored admin password hash, when the instance is already claimed.
     pub fn admin_password_hash(&self) -> Result<Option<String>> {
-        Ok(self.lock()
-            .query_row("SELECT admin_token_hash FROM instance WHERE id = 1", [], |row| {
-                row.get::<_, Option<String>>(0)
-            })
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT admin_token_hash FROM instance WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
             .optional()?
             .flatten())
     }
@@ -188,7 +191,8 @@ impl Store {
     /// unknown, expired or already used.
     pub fn consume_pairing_token(&self, token: &str) -> Result<Option<Role>> {
         let now = unix_now();
-        let row: Option<(String, i64, Option<i64>)> = self.lock()
+        let row: Option<(String, i64, Option<i64>)> = self
+            .lock()
             .query_row(
                 "SELECT role, expires_at, used_at FROM pairing_tokens WHERE token = ?1",
                 params![token],
@@ -244,7 +248,8 @@ impl Store {
 
     /// Looks up one device.
     pub fn device(&self, id: &DeviceId) -> Result<Option<StoredDevice>> {
-        let row = self.lock()
+        let row = self
+            .lock()
             .query_row(
                 "SELECT id, name, platform, role, public_key, created_at, last_seen_at
                  FROM devices WHERE id = ?1",
@@ -272,10 +277,9 @@ impl Store {
 
     /// Removes a device from the pool.
     pub fn remove_device(&self, id: &DeviceId) -> Result<bool> {
-        let affected = self.lock().execute(
-            "DELETE FROM devices WHERE id = ?1",
-            params![id.as_str()],
-        )?;
+        let affected = self
+            .lock()
+            .execute("DELETE FROM devices WHERE id = ?1", params![id.as_str()])?;
         Ok(affected > 0)
     }
 
@@ -289,7 +293,8 @@ impl Store {
 
     /// Number of devices, used to render the admin summary.
     pub fn device_count(&self) -> Result<i64> {
-        Ok(self.lock()
+        Ok(self
+            .lock()
             .query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))?)
     }
 
@@ -365,7 +370,10 @@ mod tests {
         store.ensure_instance("s", &"f".repeat(64)).unwrap();
         assert!(store.admin_password_hash().unwrap().is_none());
         store.set_admin_password_hash("hash").unwrap();
-        assert_eq!(store.admin_password_hash().unwrap().as_deref(), Some("hash"));
+        assert_eq!(
+            store.admin_password_hash().unwrap().as_deref(),
+            Some("hash")
+        );
     }
 
     #[test]
@@ -396,7 +404,9 @@ mod tests {
     fn devices_roundtrip() {
         let store = store();
         store.upsert_device(&device("mac", Role::Host)).unwrap();
-        store.upsert_device(&device("phone", Role::Controller)).unwrap();
+        store
+            .upsert_device(&device("phone", Role::Controller))
+            .unwrap();
         assert_eq!(store.device_count().unwrap(), 2);
 
         let mac = store.device(&DeviceId::new("id-mac")).unwrap().unwrap();

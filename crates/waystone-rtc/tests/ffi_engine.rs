@@ -153,14 +153,7 @@ fn ffi_session_delivers_media_and_input() {
         frame.extend_from_slice(payload);
     }
     for index in 0..10 {
-        unsafe {
-            ws_engine_send_video(
-                host.handle,
-                frame.as_ptr(),
-                frame.len(),
-                index * 3000,
-            )
-        };
+        unsafe { ws_engine_send_video(host.handle, frame.as_ptr(), frame.len(), index * 3000) };
         std::thread::sleep(Duration::from_millis(30));
     }
 

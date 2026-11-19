@@ -113,7 +113,8 @@ mod tests {
 
     fn keypair() -> (SigningKey, String) {
         let signing = SigningKey::from_bytes(&[42u8; 32]);
-        let public = waystone_proto::identity::encode_public_key(&signing.verifying_key().to_bytes());
+        let public =
+            waystone_proto::identity::encode_public_key(&signing.verifying_key().to_bytes());
         (signing, public)
     }
 

@@ -44,6 +44,7 @@ sha1 = "0.10"
 webrtc-util = "0.17"
 
 [dev-dependencies]
+waystone-rtc = { path = "../waystone-rtc" }
 tokio-tungstenite = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = { workspace = true }

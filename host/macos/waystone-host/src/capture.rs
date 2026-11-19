@@ -257,11 +257,7 @@ mod input_tests {
 
     #[test]
     fn a_move_frame_decodes() {
-        let frame = InputEvent::MouseMove {
-            x: 32768,
-            y: 16384,
-        }
-        .to_bytes();
+        let frame = InputEvent::MouseMove { x: 32768, y: 16384 }.to_bytes();
         // Injection needs a real desktop session, so only the length and opcode
         // are asserted here; the Swift side is covered by its own compile step.
         assert_eq!(frame.len(), 5);

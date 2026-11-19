@@ -15,7 +15,9 @@ use str0m::format::Codec;
 use str0m::media::Frequency;
 use str0m::media::{Direction, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, CandidateKind, Event as RtcEvent, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use str0m::{
+    Candidate, CandidateKind, Event as RtcEvent, IceConnectionState, Input, Output, Rtc, RtcConfig,
+};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
@@ -166,18 +168,9 @@ enum Command {
     AcceptOffer(String),
     AcceptAnswer(String),
     RemoteCandidate(String),
-    SendVideo {
-        data: Vec<u8>,
-        rtp_time: u64,
-    },
-    SendAudio {
-        data: Vec<u8>,
-        rtp_time: u64,
-    },
-    SendInput {
-        reliable: bool,
-        data: Vec<u8>,
-    },
+    SendVideo { data: Vec<u8>, rtp_time: u64 },
+    SendAudio { data: Vec<u8>, rtp_time: u64 },
+    SendInput { reliable: bool, data: Vec<u8> },
     SetVideoBitrate(u32),
     Shutdown,
 }
@@ -458,7 +451,9 @@ impl Driver {
         let Ok(receive) = Receive::new(Protocol::Udp, from, self.local_addr, datagram) else {
             return;
         };
-        self.rtc.handle_input(Input::Receive(Instant::now(), receive)).ok();
+        self.rtc
+            .handle_input(Input::Receive(Instant::now(), receive))
+            .ok();
     }
 
     async fn gather_candidates(&mut self) {
@@ -564,9 +559,8 @@ impl Driver {
 
         let mut changes = self.rtc.sdp_api();
         let video = changes.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
-        let audio_mid = audio.then(|| {
-            changes.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None)
-        });
+        let audio_mid = audio
+            .then(|| changes.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None));
         self.video_mid = Some(video);
         self.audio_mid = audio_mid;
 
@@ -600,10 +594,9 @@ impl Driver {
                 (self.config.sink)(Event::Connected);
                 self.resolve_media();
             }
-            RtcEvent::IceConnectionStateChange(state) => match state {
-                IceConnectionState::Disconnected => (self.config.sink)(Event::Disconnected),
-                _ => {}
-            },
+            RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => {
+                (self.config.sink)(Event::Disconnected)
+            }
             RtcEvent::MediaData(data) => {
                 let keyframe = data.is_keyframe();
                 if Some(data.mid) == self.video_mid {
@@ -662,7 +655,11 @@ impl Driver {
                 let relayed = stats
                     .selected_candidate_pair
                     .as_ref()
-                    .and_then(|pair| self.turn.as_ref().map(|turn| turn.relayed() == Some(pair.local.addr)))
+                    .and_then(|pair| {
+                        self.turn
+                            .as_ref()
+                            .map(|turn| turn.relayed() == Some(pair.local.addr))
+                    })
                     .unwrap_or(self.relayed);
                 if relayed != self.relayed {
                     self.apply_bitrate_ceiling(relayed);
@@ -839,7 +836,10 @@ fn local_ips() -> Vec<IpAddr> {
 }
 
 fn local_ip_for(_remote: IpAddr) -> IpAddr {
-    local_ips().into_iter().next().unwrap_or(IpAddr::from([0, 0, 0, 0]))
+    local_ips()
+        .into_iter()
+        .next()
+        .unwrap_or(IpAddr::from([0, 0, 0, 0]))
 }
 
 /// Helper used by tests and the FFI layer to build a sink from a closure.

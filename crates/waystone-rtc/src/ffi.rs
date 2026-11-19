@@ -40,8 +40,7 @@ const MEDIA_HEADER_LEN: usize = 16;
 ///
 /// `data` is only valid for the duration of the call; Swift must copy what it
 /// needs. `ctx` is the pointer handed to [`ws_engine_start`].
-pub type WsEventCallback =
-    extern "C" fn(kind: i32, data: *const u8, len: usize, ctx: *mut c_void);
+pub type WsEventCallback = extern "C" fn(kind: i32, data: *const u8, len: usize, ctx: *mut c_void);
 
 /// Context pointer wrapped so it can cross the engine task boundary.
 ///
@@ -184,28 +183,28 @@ unsafe fn start_inner(
     let sink = sink(move |event: Event| {
         let ctx = context.get();
         match event {
-        Event::VideoFrame {
-            data,
-            keyframe,
-            rtp_time,
-        } => {
-            let flags = if keyframe { 1u8 } else { 0 };
-            let frame = encode_media(WS_EVENT_VIDEO as u8, flags, rtp_time, &data);
-            callback(WS_EVENT_VIDEO, frame.as_ptr(), frame.len(), ctx);
-        }
-        Event::AudioFrame { data, rtp_time } => {
-            let frame = encode_media(WS_EVENT_AUDIO as u8, 0, rtp_time, &data);
-            callback(WS_EVENT_AUDIO, frame.as_ptr(), frame.len(), ctx);
-        }
-        Event::Input { reliable, data } => {
-            let flags = if reliable { 2u8 } else { 0 };
-            let frame = encode_media(WS_EVENT_INPUT as u8, flags, 0, &data);
-            callback(WS_EVENT_INPUT, frame.as_ptr(), frame.len(), ctx);
-        }
-        other => {
-            let json = control_json(&other);
-            callback(WS_EVENT_CONTROL, json.as_ptr(), json.len(), ctx);
-        }
+            Event::VideoFrame {
+                data,
+                keyframe,
+                rtp_time,
+            } => {
+                let flags = if keyframe { 1u8 } else { 0 };
+                let frame = encode_media(WS_EVENT_VIDEO as u8, flags, rtp_time, &data);
+                callback(WS_EVENT_VIDEO, frame.as_ptr(), frame.len(), ctx);
+            }
+            Event::AudioFrame { data, rtp_time } => {
+                let frame = encode_media(WS_EVENT_AUDIO as u8, 0, rtp_time, &data);
+                callback(WS_EVENT_AUDIO, frame.as_ptr(), frame.len(), ctx);
+            }
+            Event::Input { reliable, data } => {
+                let flags = if reliable { 2u8 } else { 0 };
+                let frame = encode_media(WS_EVENT_INPUT as u8, flags, 0, &data);
+                callback(WS_EVENT_INPUT, frame.as_ptr(), frame.len(), ctx);
+            }
+            other => {
+                let json = control_json(&other);
+                callback(WS_EVENT_CONTROL, json.as_ptr(), json.len(), ctx);
+            }
         }
     });
 
@@ -268,7 +267,9 @@ pub unsafe extern "C" fn ws_engine_stop(handle: *mut WsEngine) {
     engine.engine.shutdown();
     // Give the driver task a moment to emit its final event.
     std::thread::sleep(std::time::Duration::from_millis(50));
-    engine.runtime.shutdown_timeout(std::time::Duration::from_millis(500));
+    engine
+        .runtime
+        .shutdown_timeout(std::time::Duration::from_millis(500));
 }
 
 /// Local UDP address of the transport, as `12345` in `buffer`.
@@ -353,8 +354,12 @@ pub unsafe extern "C" fn ws_engine_send_video(
     len: usize,
     rtp_time: u64,
 ) {
-    let Some(engine) = handle.as_ref() else { return };
-    let Some(bytes) = slice(data, len) else { return };
+    let Some(engine) = handle.as_ref() else {
+        return;
+    };
+    let Some(bytes) = slice(data, len) else {
+        return;
+    };
     engine.engine.send_video(bytes.to_vec(), rtp_time);
 }
 
@@ -370,8 +375,12 @@ pub unsafe extern "C" fn ws_engine_send_audio(
     len: usize,
     rtp_time: u64,
 ) {
-    let Some(engine) = handle.as_ref() else { return };
-    let Some(bytes) = slice(data, len) else { return };
+    let Some(engine) = handle.as_ref() else {
+        return;
+    };
+    let Some(bytes) = slice(data, len) else {
+        return;
+    };
     engine.engine.send_audio(bytes.to_vec(), rtp_time);
 }
 
@@ -387,8 +396,12 @@ pub unsafe extern "C" fn ws_engine_send_input(
     data: *const u8,
     len: usize,
 ) {
-    let Some(engine) = handle.as_ref() else { return };
-    let Some(bytes) = slice(data, len) else { return };
+    let Some(engine) = handle.as_ref() else {
+        return;
+    };
+    let Some(bytes) = slice(data, len) else {
+        return;
+    };
     engine.engine.send_input(reliable, bytes.to_vec());
 }
 

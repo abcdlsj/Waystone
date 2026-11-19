@@ -59,7 +59,7 @@ async fn claim(State(state): State<AppState>, form: String) -> Response {
     let password = form
         .split('&')
         .find_map(|pair| pair.strip_prefix("password="))
-        .map(|raw| url_decode(raw))
+        .map(url_decode)
         .unwrap_or_default();
     if password.len() < 8 {
         return (
@@ -68,7 +68,10 @@ async fn claim(State(state): State<AppState>, form: String) -> Response {
         )
             .into_response();
     }
-    if let Err(error) = state.store.set_admin_password_hash(&hash_password(&password)) {
+    if let Err(error) = state
+        .store
+        .set_admin_password_hash(&hash_password(&password))
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": error.to_string() })),
@@ -150,10 +153,7 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn create_pairing(
-    State(state): State<AppState>,
-    Query(query): Query<PairQuery>,
-) -> Response {
+async fn create_pairing(State(state): State<AppState>, Query(query): Query<PairQuery>) -> Response {
     let role = match query.role.as_deref() {
         Some("host") => Role::Host,
         _ => Role::Controller,
@@ -233,7 +233,10 @@ async fn signaling(
     // Browsers send an Origin header; native clients do not. Rejecting only
     // cross-site browser origins keeps the channel usable for the apps while
     // stopping a random web page from opening it.
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()) {
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
         if !origin.starts_with("https://") {
             return StatusCode::FORBIDDEN.into_response();
         }
@@ -340,21 +343,19 @@ fn render_panel(state: &AppState, claimed: bool, unlocked: bool) -> String {
         .collect::<String>();
 
     let body = if !claimed {
-        format!(
-            r#"<p class="hint">This instance is not claimed yet. Set an admin password to
-            protect the panel. Pick up the pairing QR afterwards to enroll your devices.</p>
-            <form method="post" action="/api/claim"><input type="password" name="password"
-            placeholder="admin password"><button>Claim instance</button></form>"#
-        )
+        r#"<p class="hint">This instance is not claimed yet. Set an admin password to
+        protect the panel. Pick up the pairing QR afterwards to enroll your devices.</p>
+        <form method="post" action="/api/claim"><input type="password" name="password"
+        placeholder="admin password"><button>Claim instance</button></form>"#
+            .to_string()
     } else if !unlocked {
         r#"<p class="hint">Enter the admin password to manage this instance.</p>"#.to_string()
     } else {
-        format!(
-            r#"<div class="actions">
-            <button data-role="controller">Add a controller</button>
-            <button data-role="host">Add a host</button>
-            </div><div id="qr"></div>"#
-        )
+        r#"<div class="actions">
+        <button data-role="controller">Add a controller</button>
+        <button data-role="host">Add a host</button>
+        </div><div id="qr"></div>"#
+            .to_string()
     };
 
     format!(

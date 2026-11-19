@@ -81,8 +81,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let dir = args.state_dir.clone().unwrap_or_else(state_dir);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
     match args.command {
         Command::Pair { uri, name } => pair(dir, uri, name).await,
@@ -176,7 +175,10 @@ fn status(dir: PathBuf) -> Result<()> {
     println!("endpoint    {}", config.endpoint);
     println!("turn        {}", config.turn);
     println!("fingerprint {}", config.fingerprint);
-    println!("capture     {}x{} @ {} fps", config.capture.0, config.capture.1, config.fps);
+    println!(
+        "capture     {}x{} @ {} fps",
+        config.capture.0, config.capture.1, config.fps
+    );
     Ok(())
 }
 
@@ -272,21 +274,30 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                     }
                 }
             }
-            ServerMessage::RtcSignal { session_id, signal: rtc } => {
-                let Some(state) = active.as_mut() else { continue };
+            ServerMessage::RtcSignal {
+                session_id,
+                signal: rtc,
+            } => {
+                let Some(state) = active.as_mut() else {
+                    continue;
+                };
                 if state.session_id != session_id {
                     continue;
                 }
                 match rtc {
                     RtcSignal::Offer { sdp } => state.engine.accept_offer(sdp),
-                    RtcSignal::Ice { candidate, .. } => state.engine.add_remote_candidate(candidate),
+                    RtcSignal::Ice { candidate, .. } => {
+                        state.engine.add_remote_candidate(candidate)
+                    }
                     RtcSignal::Answer { .. } | RtcSignal::IceComplete => {
                         debug!("ignoring a message only the controller sends")
                     }
                 }
             }
             ServerMessage::SessionControl { control, .. } => match control {
-                waystone_proto::signal::SessionControl::RequestKeyframe => capture.request_keyframe(),
+                waystone_proto::signal::SessionControl::RequestKeyframe => {
+                    capture.request_keyframe()
+                }
                 other => debug!("session control {other:?} is not implemented yet"),
             },
             ServerMessage::SessionEnded {
@@ -317,7 +328,9 @@ async fn handle_engine_event(
     active: &mut Option<Active>,
     event: Event,
 ) -> Result<()> {
-    let Some(state) = active.as_mut() else { return Ok(()) };
+    let Some(state) = active.as_mut() else {
+        return Ok(());
+    };
     match event {
         Event::LocalAnswer(sdp) => {
             // The answer goes back through the signaling server.

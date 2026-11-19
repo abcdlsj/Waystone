@@ -64,7 +64,11 @@ impl TurnAllocation {
     ///
     /// The first request is sent without credentials so the server answers `401`
     /// with the realm and nonce that long term credentials are derived from.
-    pub fn start(server: SocketAddr, username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn start(
+        server: SocketAddr,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         let mut allocation = TurnAllocation {
             server,
             username: username.into(),
@@ -236,14 +240,18 @@ impl TurnAllocation {
         };
 
         let builder = match method {
-            method::ALLOCATE => builder.requested_transport_udp().lifetime(ALLOCATION_LIFETIME),
+            method::ALLOCATE => builder
+                .requested_transport_udp()
+                .lifetime(ALLOCATION_LIFETIME),
             method::REFRESH => builder.lifetime(ALLOCATION_LIFETIME),
             method::CHANNEL_BIND => {
                 let peer = match self.wanted_peer {
                     Some(peer) => peer,
                     None => return,
                 };
-                builder.channel_number(CHANNEL_NUMBER).xor_peer_address(peer)
+                builder
+                    .channel_number(CHANNEL_NUMBER)
+                    .xor_peer_address(peer)
             }
             _ => builder,
         };
@@ -251,7 +259,11 @@ impl TurnAllocation {
         self.pending = Some(builder.id());
         let transaction_id = self.pending.unwrap();
         let builder = builder.transaction_id(transaction_id);
-        let key = if authenticated { Some(self.key.as_slice()) } else { None };
+        let key = if authenticated {
+            Some(self.key.as_slice())
+        } else {
+            None
+        };
         self.outgoing.push(builder.build(key, true));
     }
 }
@@ -302,11 +314,8 @@ mod tests {
     use super::*;
 
     fn allocation_with_nonce() -> TurnAllocation {
-        let mut allocation = TurnAllocation::start(
-            "203.0.113.1:3478".parse().unwrap(),
-            "user",
-            "pass",
-        );
+        let mut allocation =
+            TurnAllocation::start("203.0.113.1:3478".parse().unwrap(), "user", "pass");
         let request = allocation.take_outgoing();
         assert_eq!(request.len(), 1);
 
@@ -392,7 +401,10 @@ mod tests {
     #[test]
     fn ignores_foreign_datagrams() {
         let mut allocation = allocation_with_nonce();
-        assert_eq!(allocation.handle_message(&[0x80, 0x60, 0, 1]), Progress::Idle);
+        assert_eq!(
+            allocation.handle_message(&[0x80, 0x60, 0, 1]),
+            Progress::Idle
+        );
         let foreign = Builder::new(method::ALLOCATE, class::SUCCESS).build(None, true);
         assert_eq!(allocation.handle_message(&foreign), Progress::Idle);
     }

@@ -166,7 +166,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("waystone-perm-{}", random_id()));
         Instance::load_or_create(&dir, &["localhost".to_string()]).unwrap();
-        let mode = std::fs::metadata(key_path(&dir)).unwrap().permissions().mode();
+        let mode = std::fs::metadata(key_path(&dir))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o077, 0);
         std::fs::remove_dir_all(&dir).ok();
     }

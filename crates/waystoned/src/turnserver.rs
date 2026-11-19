@@ -100,7 +100,8 @@ impl SecretAuth {
             <Hmac<Sha1> as Mac>::new_from_slice(self.secret.as_bytes()).expect("any key length");
         mac.update(username.as_bytes());
         use base64::Engine;
-        let password = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let password =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         generate_auth_key(username, realm, &password)
     }
 }

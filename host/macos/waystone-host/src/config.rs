@@ -46,10 +46,10 @@ fn default_size() -> (u32, u32) {
 impl Config {
     /// Loads the configuration from `path`.
     pub fn load(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let config: Config = serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let config: Config =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         Ok(config)
     }
 

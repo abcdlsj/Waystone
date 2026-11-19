@@ -30,7 +30,7 @@ pub async fn config(instance: &Instance) -> Result<axum_server::tls_rustls::Rust
         .with_single_cert(certs.clone(), key.clone_key())
         .context("certificate and key do not match")?;
 
-    Ok(axum_server::tls_rustls::RustlsConfig::from_der(
+    axum_server::tls_rustls::RustlsConfig::from_der(
         certs
             .iter()
             .map(|cert| cert.to_vec())
@@ -38,7 +38,7 @@ pub async fn config(instance: &Instance) -> Result<axum_server::tls_rustls::Rust
         key.secret_der().to_vec(),
     )
     .await
-    .context("loading TLS material")?)
+    .context("loading TLS material")
 }
 
 /// Parses a PEM certificate chain.
@@ -77,10 +77,7 @@ mod tests {
 
     #[test]
     fn loads_generated_material() {
-        let dir = std::env::temp_dir().join(format!(
-            "waystone-tls-{}",
-            rand::random::<u16>()
-        ));
+        let dir = std::env::temp_dir().join(format!("waystone-tls-{}", rand::random::<u16>()));
         let instance = Instance::load_or_create(&dir, &["localhost".to_string()]).unwrap();
         let certs = parse_chain(&instance.cert_pem).unwrap();
         assert_eq!(certs.len(), 1);

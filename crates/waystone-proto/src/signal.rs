@@ -68,10 +68,7 @@ pub enum SessionControl {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Enroll a device using a single use pairing token.
-    PairRequest {
-        token: String,
-        device: DeviceInfo,
-    },
+    PairRequest { token: String, device: DeviceInfo },
     /// Answer the server challenge with an Ed25519 signature.
     Auth {
         identity: Identity,
