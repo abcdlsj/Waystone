@@ -411,7 +411,7 @@ async fn authenticate(
 
     loop {
         match signal.next_message().await? {
-            ServerMessage::AuthOk { peers } => return Ok(peers),
+            ServerMessage::AuthOk { peers, .. } => return Ok(peers),
             ServerMessage::AuthRejected { reason } => {
                 anyhow::bail!("authentication rejected: {reason}")
             }

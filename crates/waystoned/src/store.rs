@@ -55,6 +55,10 @@ impl Store {
         // Write ahead logging keeps the daemon responsive while a phone syncs.
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
+        // Several short lived connections may race during startup and tests; a
+        // busy timeout turns a transient lock into a short wait instead of an
+        // error.
+        connection.busy_timeout(Duration::from_secs(5))?;
         let store = Store {
             connection: Mutex::new(connection),
         };

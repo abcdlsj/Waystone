@@ -26,6 +26,18 @@ use waystoned::hub::Hub;
 use waystoned::instance::Instance;
 use waystoned::store::Store;
 
+/// Serializes the integration tests.
+///
+/// Every test starts a real TLS server on a probe-selected port; running them in
+/// parallel makes the port selection racy, so they take turns instead.
+fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// A running test server plus the material needed to talk to it.
 struct TestServer {
     addr: SocketAddr,
@@ -203,6 +215,7 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pairing_auth_and_session_flow() {
+    let _guard = test_lock();
     let server = TestServer::start().await;
 
     // --- host enrollment -----------------------------------------------------
@@ -299,7 +312,7 @@ async fn pairing_auth_and_session_flow() {
     // The controller sees the host in its peer list.
     let peers = loop {
         match next_message(&mut controller_rx).await {
-            ServerMessage::AuthOk { peers } => break peers,
+            ServerMessage::AuthOk { peers, .. } => break peers,
             ServerMessage::PeerUpdate { .. } => continue,
             other => panic!("expected AuthOk, got {other:?}"),
         }
@@ -406,6 +419,7 @@ async fn pairing_auth_and_session_flow() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejects_a_forged_signature() {
+    let _guard = test_lock();
     let server = TestServer::start().await;
     let client = Client::new("Attacker", Platform::Ios);
     let uri = server.pairing_uri(Role::Controller);
@@ -459,6 +473,7 @@ async fn rejects_a_forged_signature() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pairing_token_is_single_use_over_the_wire() {
+    let _guard = test_lock();
     let server = TestServer::start().await;
     let uri = server.pairing_uri(Role::Controller);
 

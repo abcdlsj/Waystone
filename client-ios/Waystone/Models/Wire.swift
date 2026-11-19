@@ -61,6 +61,23 @@ enum Wire {
         }
     }
 
+    struct TurnCredentials {
+        var server: String
+        var username: String
+        var password: String
+
+        init?(json: Any?) {
+            guard let json = json as? [String: Any],
+                let server = json["server"] as? String,
+                let username = json["username"] as? String,
+                let password = json["password"] as? String
+            else { return nil }
+            self.server = server
+            self.username = username
+            self.password = password
+        }
+    }
+
     struct PeerState {
         var device: DeviceInfo
         var online: Bool
@@ -83,7 +100,7 @@ enum Wire {
         case challenge(nonce: String, serverId: String, protocolVersion: UInt32)
         case pairAccepted(serverId: String)
         case pairRejected(reason: String)
-        case authOk(peers: [PeerState])
+        case authOk(peers: [PeerState], turn: TurnCredentials?)
         case authRejected(reason: String)
         case peerUpdate(peers: [PeerState])
         case sessionAccepted(sessionId: String, isHost: Bool, peer: DeviceInfo, audio: Bool)
@@ -115,7 +132,9 @@ enum Wire {
             case "pair_rejected":
                 return .pairRejected(reason: json["reason"] as? String ?? "")
             case "auth_ok":
-                return .authOk(peers: decodePeers(json["peers"]))
+                return .authOk(
+                    peers: decodePeers(json["peers"]),
+                    turn: TurnCredentials(json: json["turn"]))
             case "auth_rejected":
                 return .authRejected(reason: json["reason"] as? String ?? "")
             case "peer_update":

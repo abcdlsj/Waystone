@@ -116,8 +116,11 @@ final class SessionController: ObservableObject {
 
     private var currentInstance: Instance?
     private var currentSession: String?
+    /// Host the user tapped before the socket finished authenticating.
     private var pendingHost: String?
     private var gesture = GestureEngine()
+    /// Relay credentials handed out by the server for this session.
+    private var turn: Wire.TurnCredentials?
     private var toggledKeys: Set<UInt32> = []
     private var stallTimer: Timer?
 
@@ -174,9 +177,18 @@ final class SessionController: ObservableObject {
 
     // MARK: - Session
 
+    /// Connects to the instance if needed, then starts a session once authenticated.
+    func connect(to instance: Instance, andStart host: Host) {
+        pendingHost = host.id
+        if currentInstance?.id == instance.id, phase == .online {
+            startSession(with: host)
+        } else {
+            connect(to: instance)
+        }
+    }
+
     func startSession(with host: Host) {
         guard let identity else { return }
-        pendingHost = host.id
         phase = .connecting(hostName: host.name)
 
         let viewport = Wire.Viewport.current(
@@ -189,8 +201,8 @@ final class SessionController: ObservableObject {
             role: "controller",
             viewport: viewport,
             audio: !audioMuted,
-            stun: currentInstance?.turn,
-            turn: nil,
+            stun: turn?.server ?? currentInstance?.turn,
+            turn: turn.map { ($0.server, $0.username, $0.password) },
             handler: { [weak self] event in
                 Task { @MainActor in self?.handleTransport(event) }
             }
@@ -340,7 +352,8 @@ final class SessionController: ObservableObject {
         case .pairRejected(let reason):
             fail(reason)
 
-        case .authOk(let peers):
+        case .authOk(let peers, let turn):
+            self.turn = turn
             hosts = peers.filter { $0.device.role == "host" }.map(Host.init)
             phase = .online
             if let instance = currentInstance {
@@ -348,7 +361,7 @@ final class SessionController: ObservableObject {
             }
             if let hostId = pendingHost, let host = hosts.first(where: { $0.id == hostId }) {
                 pendingHost = nil
-                beginStream(host: host)
+                startSession(with: host)
             }
 
         case .authRejected(let reason):
@@ -357,8 +370,11 @@ final class SessionController: ObservableObject {
         case .peerUpdate(let peers):
             hosts = peers.filter { $0.device.role == "host" }.map(Host.init)
 
-        case .sessionAccepted(let sessionId, _, _, _):
+        case .sessionAccepted(let sessionId, _, let peer, _):
             currentSession = sessionId
+            // The media graph can only be built once the server assigned a
+            // session id, because every ICE candidate is relayed with it.
+            beginStream(hostName: peer.name)
             transport?.offer()
 
         case .sessionRejected(let reason):
@@ -394,7 +410,7 @@ final class SessionController: ObservableObject {
 
     // MARK: - Transport
 
-    private func beginStream(host: Host) {
+    private func beginStream(hostName: String) {
         guard let transport else { return }
         decoder = VideoDecoder()
         decoder?.onFrame = { [weak self] buffer in
@@ -417,8 +433,7 @@ final class SessionController: ObservableObject {
         }
         self.audio = audio
 
-        phase = .streaming(hostName: host.name)
-        transport.offer()
+        phase = .streaming(hostName: hostName)
         startStallWatchdog()
     }
 
@@ -503,6 +518,7 @@ final class SessionController: ObservableObject {
     }
 
     private func fail(_ reason: String) {
+        pendingHost = nil
         lastError = reason
         phase = .ended(reason: reason)
         teardown()

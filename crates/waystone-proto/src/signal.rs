@@ -120,6 +120,18 @@ pub enum ByeReason {
     HostError,
 }
 
+/// Short lived TURN credentials handed out after authentication.
+///
+/// The daemon derives them from a shared secret instead of storing per-device
+/// passwords, and hands the same pair to both ends of a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnCredentials {
+    /// STUN/TURN authority the clients must use, e.g. `home.example.com:3478`.
+    pub server: String,
+    pub username: String,
+    pub password: String,
+}
+
 /// Online state of a paired host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerState {
@@ -147,7 +159,12 @@ pub enum ServerMessage {
     /// Pairing failed, for example because the token expired.
     PairRejected { reason: String },
     /// Authentication succeeded; the payload is the current device list.
-    AuthOk { peers: Vec<PeerState> },
+    AuthOk {
+        peers: Vec<PeerState>,
+        /// Relay credentials, omitted when the instance has no TURN server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<TurnCredentials>,
+    },
     /// Authentication failed and the socket will be closed.
     AuthRejected { reason: String },
     /// Somebody else in the pool came online or went offline.

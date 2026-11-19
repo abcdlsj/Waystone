@@ -107,7 +107,10 @@ async fn session_negotiates_and_carries_media() {
             event = host_events.recv() => match event {
                 Some(Event::LocalCandidate(candidate)) => controller.add_remote_candidate(candidate),
                 Some(Event::Connected) => host_connected = true,
-                Some(media @ Event::MediaReady { .. }) => host_media = Some(media),
+                Some(media @ Event::MediaReady {
+                    video: Some(_),
+                    audio: Some(_),
+                }) => host_media = Some(media),
                 Some(Event::Closed(reason)) => panic!("host closed: {reason}"),
                 Some(_) => {}
                 None => panic!("host channel closed"),
@@ -120,7 +123,13 @@ async fn session_negotiates_and_carries_media() {
         Some(media) => media,
         None => {
             wait_for(&mut host_events, "host media", |event| {
-                matches!(event, Event::MediaReady { video: Some(_), .. })
+                matches!(
+                    event,
+                    Event::MediaReady {
+                        video: Some(_),
+                        audio: Some(_)
+                    }
+                )
             })
             .await
         }

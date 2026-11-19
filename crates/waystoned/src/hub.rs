@@ -50,6 +50,8 @@ pub struct Hub {
 
 struct HubInner {
     server_id: String,
+    /// Relay credentials handed to every authenticated device.
+    turn: Option<waystone_proto::signal::TurnCredentials>,
     /// Outboxes of connections that have not authenticated yet, keyed by
     /// connection id so pairing and auth rejections can still be delivered.
     pending: HashMap<u64, Outbox>,
@@ -63,6 +65,7 @@ impl Hub {
         Hub {
             inner: Arc::new(Mutex::new(HubInner {
                 server_id: server_id.into(),
+                turn: None,
                 pending: HashMap::new(),
                 peers: HashMap::new(),
                 sessions: HashMap::new(),
@@ -81,6 +84,11 @@ impl Hub {
         let connection_id = self.challenges.next_connection();
         inner.pending.insert(connection_id, outbox);
         connection_id
+    }
+
+    /// Sets the relay credentials handed out after authentication.
+    pub fn set_turn_credentials(&self, turn: Option<waystone_proto::signal::TurnCredentials>) {
+        self.inner.lock().unwrap().turn = turn;
     }
 
     /// Issues the per connection challenge.
@@ -308,7 +316,8 @@ impl Hub {
         }
 
         let peers = self.peer_list_locked(&mut inner, &info.id);
-        let _ = outbox.send(ServerMessage::AuthOk { peers });
+        let turn = inner.turn.clone();
+        let _ = outbox.send(ServerMessage::AuthOk { peers, turn });
         self.broadcast_peer_update(&mut inner);
         Ok(())
     }

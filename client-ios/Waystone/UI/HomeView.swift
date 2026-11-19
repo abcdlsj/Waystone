@@ -92,8 +92,7 @@ struct HomeView: View {
                     }
                     ForEach(hostsFor(instance)) { host in
                         Button {
-                            controller.connect(to: instance)
-                            controller.startSession(with: host)
+                            controller.connect(to: instance, andStart: host)
                         } label: {
                             HStack {
                                 Image(systemName: icon(for: host.platform))
