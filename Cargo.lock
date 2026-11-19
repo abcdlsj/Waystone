@@ -3037,6 +3037,8 @@ dependencies = [
  "hmac 0.12.1",
  "md-5",
  "rand 0.9.5",
+ "serde",
+ "serde_json",
  "sha1 0.10.7",
  "str0m",
  "thiserror 2.0.21",

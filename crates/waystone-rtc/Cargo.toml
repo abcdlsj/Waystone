@@ -20,5 +20,8 @@ md-5 = "0.10"
 crc32fast = "1"
 tokio = { workspace = true }
 
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
