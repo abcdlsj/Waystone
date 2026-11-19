@@ -9,6 +9,16 @@ repository.workspace = true
 
 [dependencies]
 waystone-proto = { path = "../waystone-proto" }
-str0m = { version = "0.25", default-features = false }
-tracing = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"] }
+hmac = "0.12"
+sha1 = "0.10"
+md-5 = "0.10"
+crc32fast = "1"
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
