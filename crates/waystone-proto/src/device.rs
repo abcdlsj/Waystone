@@ -61,10 +61,21 @@ pub enum Role {
 
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Role::Host => f.write_str("host"),
-            Role::Controller => f.write_str("controller"),
-        }
+        f.write_str(match self {
+            Role::Host => "host",
+            Role::Controller => "controller",
+        })
+    }
+}
+
+impl FromStr for Role {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "host" => Role::Host,
+            _ => Role::Controller,
+        })
     }
 }
 
