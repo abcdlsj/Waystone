@@ -1,0 +1,7 @@
+[package]
+name = "waystone-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+waystone-proto = { path = "../../../crates/waystone-proto" }

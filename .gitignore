@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Swift / Xcode
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj
+*.xcworkspace
+!*.xcodeproj/project.pbxproj
+
+# Runtime data
+/data/
+*.log
+.DS_Store
