@@ -1,7 +1,39 @@
 [package]
 name = "waystone-host"
+description = "macOS host agent: captures the desktop, encodes HEVC and streams it"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "waystone-host"
+path = "src/main.rs"
 
 [dependencies]
+waystone-proto = { path = "../../../crates/waystone-proto" }
+waystone-rtc = { path = "../../../crates/waystone-rtc" }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3"
 waystone-proto = { path = "../../../crates/waystone-proto" }

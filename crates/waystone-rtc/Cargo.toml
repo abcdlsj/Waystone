@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "waystone_rtc"
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 waystone-proto = { path = "../waystone-proto" }
 base64 = { workspace = true }

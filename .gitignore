@@ -2,14 +2,14 @@
 /target
 **/*.rs.bk
 
-# Swift / Xcode
+# Xcode
 .build/
+build/
 DerivedData/
 *.xcuserstate
 xcuserdata/
-*.xcodeproj
-*.xcworkspace
 !*.xcodeproj/project.pbxproj
+client-ios/Vendor/
 
 # Runtime data
 /data/
