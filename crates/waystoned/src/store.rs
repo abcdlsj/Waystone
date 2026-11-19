@@ -5,6 +5,7 @@
 //! device pool and the single use pairing tokens.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -34,8 +35,11 @@ pub struct StoredToken {
 }
 
 /// Handle to the instance database.
+///
+/// The connection is behind a mutex because `rusqlite` connections are not `Sync`;
+/// statements are short so the lock is never held across an await point.
 pub struct Store {
-    connection: Connection,
+    connection: Mutex<Connection>,
 }
 
 impl Store {
@@ -51,7 +55,9 @@ impl Store {
         // Write ahead logging keeps the daemon responsive while a phone syncs.
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        let store = Store { connection };
+        let store = Store {
+            connection: Mutex::new(connection),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -61,8 +67,15 @@ impl Store {
         data_dir.as_ref().join("waystone.sqlite3")
     }
 
+    /// Locks the connection for one short statement.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn migrate(&self) -> Result<()> {
-        self.connection.execute_batch(
+        self.lock().execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS instance (
                 id               INTEGER PRIMARY KEY CHECK (id = 1),
@@ -96,13 +109,13 @@ impl Store {
     /// Creates the instance row on first boot and returns the stored values.
     pub fn ensure_instance(&mut self, server_id: &str, fingerprint: &str) -> Result<()> {
         let now = unix_now();
-        self.connection.execute(
+        self.lock().execute(
             "INSERT OR IGNORE INTO instance (id, server_id, fingerprint, created_at)
              VALUES (1, ?1, ?2, ?3)",
             params![server_id, fingerprint, now],
         )?;
         // A certificate reissue keeps the instance id but must update the pin.
-        self.connection.execute(
+        self.lock().execute(
             "UPDATE instance SET fingerprint = ?1 WHERE id = 1",
             params![fingerprint],
         )?;
@@ -111,8 +124,7 @@ impl Store {
 
     /// The instance id used inside challenge signatures.
     pub fn server_id(&self) -> Result<String> {
-        Ok(self
-            .connection
+        Ok(self.lock()
             .query_row("SELECT server_id FROM instance WHERE id = 1", [], |row| {
                 row.get::<_, String>(0)
             })
@@ -121,8 +133,7 @@ impl Store {
 
     /// The pinned certificate fingerprint.
     pub fn fingerprint(&self) -> Result<String> {
-        Ok(self
-            .connection
+        Ok(self.lock()
             .query_row("SELECT fingerprint FROM instance WHERE id = 1", [], |row| {
                 row.get::<_, String>(0)
             })
@@ -131,7 +142,7 @@ impl Store {
 
     /// Hashes and stores the admin password. Only the hash is persisted.
     pub fn set_admin_password_hash(&self, hash: &str) -> Result<()> {
-        self.connection.execute(
+        self.lock().execute(
             "UPDATE instance SET admin_token_hash = ?1 WHERE id = 1",
             params![hash],
         )?;
@@ -140,8 +151,7 @@ impl Store {
 
     /// The stored admin password hash, when the instance is already claimed.
     pub fn admin_password_hash(&self) -> Result<Option<String>> {
-        Ok(self
-            .connection
+        Ok(self.lock()
             .query_row("SELECT admin_token_hash FROM instance WHERE id = 1", [], |row| {
                 row.get::<_, Option<String>>(0)
             })
@@ -156,7 +166,7 @@ impl Store {
         rand::Rng::fill(&mut rand::rng(), &mut raw);
         let token = hex::encode(raw);
         let expires_at = unix_now() + ttl.as_secs();
-        self.connection.execute(
+        self.lock().execute(
             "INSERT INTO pairing_tokens (token, role, expires_at) VALUES (?1, ?2, ?3)",
             params![token, role.to_string(), expires_at as i64],
         )?;
@@ -174,8 +184,7 @@ impl Store {
     /// unknown, expired or already used.
     pub fn consume_pairing_token(&self, token: &str) -> Result<Option<Role>> {
         let now = unix_now();
-        let row: Option<(String, i64, Option<i64>)> = self
-            .connection
+        let row: Option<(String, i64, Option<i64>)> = self.lock()
             .query_row(
                 "SELECT role, expires_at, used_at FROM pairing_tokens WHERE token = ?1",
                 params![token],
@@ -189,7 +198,7 @@ impl Store {
         if used_at.is_some() || (expires_at as u64) <= now {
             return Ok(None);
         }
-        self.connection.execute(
+        self.lock().execute(
             "UPDATE pairing_tokens SET used_at = ?1 WHERE token = ?2",
             params![now as i64, token],
         )?;
@@ -199,7 +208,7 @@ impl Store {
     /// Inserts or refreshes a device.
     pub fn upsert_device(&self, info: &DeviceInfo) -> Result<()> {
         let now = unix_now();
-        self.connection.execute(
+        self.lock().execute(
             "INSERT INTO devices (id, name, platform, role, public_key, created_at, last_seen_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
              ON CONFLICT(id) DO UPDATE SET
@@ -222,7 +231,7 @@ impl Store {
 
     /// Records that a device just connected.
     pub fn touch_device(&self, id: &DeviceId) -> Result<()> {
-        self.connection.execute(
+        self.lock().execute(
             "UPDATE devices SET last_seen_at = ?1 WHERE id = ?2",
             params![unix_now() as i64, id.as_str()],
         )?;
@@ -231,8 +240,7 @@ impl Store {
 
     /// Looks up one device.
     pub fn device(&self, id: &DeviceId) -> Result<Option<StoredDevice>> {
-        let row = self
-            .connection
+        let row = self.lock()
             .query_row(
                 "SELECT id, name, platform, role, public_key, created_at, last_seen_at
                  FROM devices WHERE id = ?1",
@@ -245,7 +253,8 @@ impl Store {
 
     /// Every device in the pool.
     pub fn devices(&self) -> Result<Vec<StoredDevice>> {
-        let mut statement = self.connection.prepare(
+        let connection = self.lock();
+        let mut statement = connection.prepare(
             "SELECT id, name, platform, role, public_key, created_at, last_seen_at
              FROM devices ORDER BY created_at",
         )?;
@@ -259,7 +268,7 @@ impl Store {
 
     /// Removes a device from the pool.
     pub fn remove_device(&self, id: &DeviceId) -> Result<bool> {
-        let affected = self.connection.execute(
+        let affected = self.lock().execute(
             "DELETE FROM devices WHERE id = ?1",
             params![id.as_str()],
         )?;
@@ -276,15 +285,14 @@ impl Store {
 
     /// Number of devices, used to render the admin summary.
     pub fn device_count(&self) -> Result<i64> {
-        Ok(self
-            .connection
+        Ok(self.lock()
             .query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))?)
     }
 
     /// Prunes expired pairing tokens; called on a timer.
     pub fn prune_tokens(&self) -> Result<usize> {
         let now = unix_now() as i64;
-        let removed = self.connection.execute(
+        let removed = self.lock().execute(
             "DELETE FROM pairing_tokens WHERE expires_at < ?1 OR used_at IS NOT NULL",
             params![now],
         )?;

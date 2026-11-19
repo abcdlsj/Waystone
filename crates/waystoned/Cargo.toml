@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "waystoned"
+path = "src/lib.rs"
+
 [[bin]]
 name = "waystoned"
 path = "src/main.rs"
@@ -14,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 waystone-proto = { path = "../waystone-proto" }
 anyhow = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 ed25519-dalek = { workspace = true }
@@ -33,11 +39,11 @@ tokio-util = "0.7"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 turn = "0.17"
+hmac = "0.12"
+sha1 = "0.10"
 webrtc-util = "0.17"
-
-[lib]
-name = "waystoned"
-path = "src/lib.rs"
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pemfile = { workspace = true }

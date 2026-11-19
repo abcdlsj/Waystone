@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
 use waystone_proto::device::{DeviceId, DeviceInfo, Role};
@@ -72,17 +72,15 @@ impl Hub {
         }
     }
 
-    /// Registers a new connection and returns its id plus the outbox that the
-    /// socket handler must drain into the WebSocket.
+    /// Registers a new connection with the outbox that the socket handler drains
+    /// into the WebSocket.
     ///
-    /// The first message the caller should send is the challenge, produced by
-    /// [`Hub::challenge`].
-    pub fn connect(&self) -> (u64, Outbox) {
-        let (outbox, _receiver) = unbounded_channel();
+    /// The first message the caller sends is the challenge from [`Hub::challenge`].
+    pub fn connect(&self, outbox: Outbox) -> u64 {
         let mut inner = self.inner.lock().unwrap();
         let connection_id = self.challenges.next_connection();
-        inner.pending.insert(connection_id, outbox.clone());
-        (connection_id, outbox)
+        inner.pending.insert(connection_id, outbox);
+        connection_id
     }
 
     /// Issues the per connection challenge.
