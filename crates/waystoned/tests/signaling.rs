@@ -38,12 +38,8 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> TestServer {
-        // Both server and client use ring; installing it once removes the
-        // feature-detection ambiguity that appears when both providers are built.
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        INSTALL.call_once(|| {
-            let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-        });
+        // Server and test client share one crypto provider.
+        waystoned::tls::install_crypto_provider();
         let dir = std::env::temp_dir().join(format!(
             "waystone-it-{}",
             std::time::SystemTime::now()

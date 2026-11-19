@@ -9,8 +9,20 @@ use rustls::ServerConfig;
 
 use crate::instance::Instance;
 
+/// Installs the process wide crypto provider.
+///
+/// Both `ring` and `aws-lc-rs` end up in the dependency graph (axum-server pulls
+/// one, the test client the other), so rustls cannot pick a provider on its own.
+pub fn install_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Builds the rustls configuration from the persisted certificate.
 pub async fn config(instance: &Instance) -> Result<axum_server::tls_rustls::RustlsConfig> {
+    install_crypto_provider();
     let certs = parse_chain(&instance.cert_pem)?;
     let key = parse_key(&instance.key_pem)?;
     let _ = ServerConfig::builder()
@@ -49,6 +61,7 @@ pub fn parse_key(pem: &str) -> Result<PrivateKeyDer<'static>> {
 
 /// Convenience wrapper that builds a `ServerConfig` for tests.
 pub fn server_config(instance: &Instance) -> Result<Arc<ServerConfig>> {
+    install_crypto_provider();
     let certs = parse_chain(&instance.cert_pem)?;
     let key = parse_key(&instance.key_pem)?;
     Ok(Arc::new(
