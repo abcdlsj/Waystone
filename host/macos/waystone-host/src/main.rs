@@ -267,21 +267,8 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 // choice wins over the local default. The encoder and the SDP
                 // offer must agree: a mismatch leaves the viewer with audio and
                 // a permanently black picture.
-                let codec = video_codec.as_deref().unwrap_or(&config.codec);
-                info!("encoding {codec}");
-                let (width, height) = (config.capture.0, config.capture.1);
-                if let Err(error) =
-                    capture.start(width, height, config.fps, config.max_bitrate, codec)
-                {
-                    error!("capture failed: {error}");
-                    signal
-                        .send(&ClientMessage::SessionBye {
-                            session_id,
-                            reason: ByeReason::HostError,
-                        })
-                        .await?;
-                    continue;
-                }
+                let codec = video_codec.as_deref().unwrap_or(&config.codec).to_string();
+                info!("session codec is {codec}");
 
                 let (event_tx, event_rx) = unbounded_channel();
                 let sink = sink(move |event: Event| {
@@ -290,7 +277,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 // The relay credentials are allocated by the server per session;
                 // until that is wired up the host only advertises direct paths.
                 let mut engine_config = EngineConfig::new(waystone_rtc::Role::Host, sink)
-                    .with_video_codec(waystone_rtc::VideoCodec::parse(codec));
+                    .with_video_codec(waystone_rtc::VideoCodec::parse(&codec));
                 if let Some(viewport) = viewport {
                     engine_config = engine_config.with_session(SessionOptions {
                         viewport,
@@ -302,17 +289,19 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 match Engine::start(engine_config).await {
                     Ok(engine) => {
                         bridge.attach(engine.clone());
-                        // VideoToolbox starts with a non-IDR frame unless it is
-                        // asked otherwise, and the controller cannot decode
-                        // anything before the first keyframe.
-                        capture.request_keyframe();
+                        // The encoder is started only once the offer is applied:
+                        // everything it produces before the media sections exist
+                        // is dropped by the engine, and the controller was
+                        // measured asking for the session up to half a minute
+                        // before it sends the offer.
                         active = Some(Active {
                             session_id: session_id.clone(),
-                            engine,
+                            engine: engine.clone(),
+                            codec: codec.clone(),
                             events: event_rx,
                             last_keyframe_request: std::time::Instant::now(),
                         });
-                        // Replay what arrived while capture was starting.
+                        // Replay what arrived while the engine was starting.
                         // The offer has to be applied first: ICE candidates that
                         // an engine receives before the remote credentials are
                         // known cannot be matched to a ufrag and are dropped.
@@ -325,18 +314,17 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                             match signal {
                                 RtcSignal::Offer { sdp } => {
                                     info!("replaying the buffered offer");
-                                    if let Some(state) = active.as_ref() {
-                                        state.engine.accept_offer(sdp);
+                                    engine.accept_offer(sdp);
+                                    if let Err(error) = start_capture(&capture, config, &codec) {
+                                        error!("capture failed: {error}");
                                     }
                                 }
                                 RtcSignal::Ice { candidate, .. } => deferred_ice.push(candidate),
                                 _ => {}
                             }
                         }
-                        if let Some(state) = active.as_ref() {
-                            for candidate in deferred_ice {
-                                state.engine.add_remote_candidate(candidate);
-                            }
+                        for candidate in deferred_ice {
+                            engine.add_remote_candidate(candidate);
                         }
                     }
                     Err(error) => {
@@ -355,20 +343,39 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 session_id,
                 signal: rtc,
             } => {
-                let Some(state) = active.as_mut() else {
+                // Everything the handler needs is cloned out first, so the borrow
+                // on `active` ends before a failure path may tear the session down.
+                let Some((active_id, engine, codec)) = active
+                    .as_ref()
+                    .filter(|state| state.session_id == session_id)
+                    .map(|state| {
+                        (
+                            state.session_id.clone(),
+                            state.engine.clone(),
+                            state.codec.clone(),
+                        )
+                    })
+                else {
                     continue;
                 };
-                if state.session_id != session_id {
-                    continue;
-                }
                 match rtc {
                     RtcSignal::Offer { sdp } => {
                         info!("accepting the controller offer");
-                        state.engine.accept_offer(sdp)
+                        // The answer goes out first: starting the capture layer
+                        // blocks for a moment and the controller is waiting.
+                        engine.accept_offer(sdp);
+                        if let Err(error) = start_capture(&capture, config, &codec) {
+                            error!("capture failed: {error}");
+                            let _ = signal
+                                .send(&ClientMessage::SessionBye {
+                                    session_id: active_id,
+                                    reason: ByeReason::HostError,
+                                })
+                                .await;
+                            stop_active(&bridge, &capture, &mut active);
+                        }
                     }
-                    RtcSignal::Ice { candidate, .. } => {
-                        state.engine.add_remote_candidate(candidate)
-                    }
+                    RtcSignal::Ice { candidate, .. } => engine.add_remote_candidate(candidate),
                     RtcSignal::Answer { .. } | RtcSignal::IceComplete => {
                         debug!("ignoring a message only the controller sends")
                     }
@@ -399,9 +406,30 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
 struct Active {
     session_id: String,
     engine: Engine,
+    /// Codec this session encodes with, chosen by the controller.
+    codec: String,
     events: tokio::sync::mpsc::UnboundedReceiver<Event>,
     /// Last time a keyframe was requested, used to throttle the retries.
     last_keyframe_request: std::time::Instant,
+}
+
+/// Starts the capture layer for `codec` unless it is already running.
+///
+/// Called when the controller's offer arrives rather than when the session is
+/// accepted: ScreenCaptureKit and the encoder take about a second to come up and
+/// everything they produce before the media sections exist is dropped, so
+/// starting early only burns CPU (the simulator was seen asking for a session 30
+/// seconds before sending the offer).
+fn start_capture(capture: &Capture, config: &Config, codec: &str) -> Result<()> {
+    if capture.is_running() {
+        return Ok(());
+    }
+    let (width, height) = config.capture;
+    info!(
+        "starting capture {width}x{height} @ {} fps, encoding {codec}",
+        config.fps
+    );
+    capture.start(width, height, config.fps, config.max_bitrate, codec)
 }
 
 async fn handle_engine_event(

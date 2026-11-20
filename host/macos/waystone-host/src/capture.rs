@@ -200,6 +200,11 @@ impl Capture {
         Ok(())
     }
 
+    /// True while the capture layer is producing frames.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
     /// Stops capturing.
     pub fn stop(&self) {
         if self.running.swap(false, Ordering::Relaxed) {
