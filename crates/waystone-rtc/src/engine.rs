@@ -538,8 +538,14 @@ impl Driver {
         let port = self.local_addr.port();
         // A socket bound to a concrete address can only be reached through that
         // address, so advertising every interface would create dead candidates.
+        // A socket bound to `0.0.0.0` cannot send to an IPv6 address at all, so
+        // the candidate family follows the socket: otherwise every IPv6 host
+        // candidate is a guaranteed dead pair.
         let ips = if self.local_addr.ip().is_unspecified() {
             local_ips()
+                .into_iter()
+                .filter(|ip| ip.is_ipv4() == self.local_addr.is_ipv4())
+                .collect()
         } else {
             vec![self.local_addr.ip()]
         };
@@ -930,6 +936,14 @@ fn local_ips() -> Vec<IpAddr> {
             } {
                 continue;
             }
+            // Point to point style interfaces can carry the network or broadcast
+            // address of their subnet (a VM bridge on this machine does). Those
+            // addresses cannot be a unicast destination at all, so every
+            // candidate built from them is dead on arrival.
+            if !is_sendable(ip) {
+                debug!("skipping unreachable address {ip} on {}", interface.name);
+                continue;
+            }
             if !ips.contains(&ip) {
                 ips.push(ip);
             }
@@ -955,6 +969,24 @@ fn is_tunnel(name: &str) -> bool {
     PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
+/// True when a packet to `ip` can leave this machine.
+///
+/// The kernel reports addresses it cannot route to (the network or broadcast
+/// address of a bridge, for instance); a zero length datagram is the cheapest
+/// way to ask, and a candidate that fails here would only produce failed
+/// connectivity checks.
+fn is_sendable(ip: IpAddr) -> bool {
+    let bind: SocketAddr = if ip.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0u16; 8], 0))
+    };
+    let Ok(socket) = std::net::UdpSocket::bind(bind) else {
+        return false;
+    };
+    socket.send_to(&[], SocketAddr::new(ip, 9)).is_ok()
+}
+
 fn local_ip_for(_remote: IpAddr) -> IpAddr {
     local_ips()
         .into_iter()
@@ -977,3 +1009,23 @@ pub fn channel_map() -> HashMap<&'static str, bool> {
 
 /// Re-exported so callers can build STUN probes without depending on the module.
 pub use stun::Builder as StunBuilder;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unusable_addresses_are_not_sendable() {
+        // A VM bridge on macOS reports the network address of its subnet.
+        assert!(!is_sendable("192.168.215.0".parse().unwrap()));
+        assert!(is_sendable("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn tunnel_interfaces_are_skipped() {
+        assert!(is_tunnel("utun4"));
+        assert!(is_tunnel("awdl0"));
+        assert!(!is_tunnel("en0"));
+        assert!(!is_tunnel("bridge100"));
+    }
+}
