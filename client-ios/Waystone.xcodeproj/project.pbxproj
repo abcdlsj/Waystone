@@ -23,18 +23,21 @@
 		528B81780E0DB8EC7BCAA5DE /* VisionKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 08CD5B113F570CE1844E64F0 /* VisionKit.framework */; };
 		57D85BF27CF61FE28819137E /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8510C078706589B0045E4824 /* CoreVideo.framework */; };
 		5CC87D8D57555B869F57AF75 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F21B9139DEDD50E250A9F63 /* DeviceIdentity.swift */; };
+		6120FEE06D681B3F91A7FC14 /* VideoDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6932C79015F68C0F8A0B56D3 /* VideoDecoderTests.swift */; };
 		6681179AF3DB0BD218248F33 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F21B9139DEDD50E250A9F63 /* DeviceIdentity.swift */; };
 		6FD8EDB8FF7DCA429C73EBD0 /* PairingScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A11AD4E8984BD1A80AFD40D /* PairingScannerView.swift */; };
 		7C2BC1AAF294AC7824139D0E /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5BDCB3E95F40559531F8238 /* AudioPlayer.swift */; };
 		7C7A163FA7A18D0619FCFA68 /* Instance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C82C4200C6C99179C5FC501B /* Instance.swift */; };
 		899C8AD2C1A572F3CD200D5E /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2E5979C80B232599CEFE878D /* AVFoundation.framework */; };
 		8C0D2D60D53AA3124C0F2041 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BAA1671634288EC6383A1962 /* AudioToolbox.framework */; };
+		8F9F6CF5C5A4C30C08CA0B62 /* h264-keyframe.h264 in Resources */ = {isa = PBXBuildFile; fileRef = DB469B485A709EBC801B53BB /* h264-keyframe.h264 */; };
 		9563427440828B8FF9C7BD4B /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FB9FA068DC3B05F8E48227DB /* Security.framework */; };
 		9605AE0D61F92BB5C5D46C29 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 81BEB2CFB7A6F8B1A14F6E3F /* MetalKit.framework */; };
 		9A1356972D844EBE3BB679C8 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E02E0883D140621A66983AB /* VideoView.swift */; };
 		A630B251907E4F35B37123FF /* WaystoneRTC.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0BF6CD7E43F4EE87770D7FC3 /* WaystoneRTC.xcframework */; };
 		C097A78E5302A57C24FEE140 /* InputFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78623DAFE4918F0D7649B053 /* InputFrame.swift */; };
 		C227E82BFF798DE26B1C12A9 /* WaystoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 611D3057E739D15AD3DF7216 /* WaystoneApp.swift */; };
+		C2A4ECE9890BDD74765ABC42 /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */; };
 		CA6494EF800EB1350E56C13C /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D539CEB7F07BFF5B2B29957F /* CoreMedia.framework */; };
 		CC3AB53D24F17F34AA5944E8 /* VideoToolboxSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 885AA4E1BE23EF282ADA9A82 /* VideoToolboxSupport.swift */; };
 		CC952B7F06552354944A123B /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */; };
@@ -68,6 +71,7 @@
 		4583C6B5ADB11664862E643B /* Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Bridging-Header.h"; sourceTree = "<group>"; };
 		611D3057E739D15AD3DF7216 /* WaystoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaystoneApp.swift; sourceTree = "<group>"; };
 		63D60F03A8CC4166E5AABC3F /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		6932C79015F68C0F8A0B56D3 /* VideoDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoderTests.swift; sourceTree = "<group>"; };
 		78623DAFE4918F0D7649B053 /* InputFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputFrame.swift; sourceTree = "<group>"; };
 		78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoder.swift; sourceTree = "<group>"; };
 		81BEB2CFB7A6F8B1A14F6E3F /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
@@ -84,6 +88,7 @@
 		C38803269209AC9370049BDA /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		C82C4200C6C99179C5FC501B /* Instance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instance.swift; sourceTree = "<group>"; };
 		D539CEB7F07BFF5B2B29957F /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
+		DB469B485A709EBC801B53BB /* h264-keyframe.h264 */ = {isa = PBXFileReference; path = "h264-keyframe.h264"; sourceTree = "<group>"; };
 		DF9661F908556707DC9FB7DA /* Transport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transport.swift; sourceTree = "<group>"; };
 		E48D1AB817D8C9F005031D29 /* GestureEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureEngine.swift; sourceTree = "<group>"; };
 		E5BDCB3E95F40559531F8238 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
@@ -166,9 +171,19 @@
 		5751DEF7AD520C3F13411CEC /* WaystoneTests */ = {
 			isa = PBXGroup;
 			children = (
+				7A92944C28DBA896EFA7C1B5 /* Fixtures */,
 				A4CE6C231262FABCCEB2A3F0 /* GestureEngineTests.swift */,
+				6932C79015F68C0F8A0B56D3 /* VideoDecoderTests.swift */,
 			);
 			path = WaystoneTests;
+			sourceTree = "<group>";
+		};
+		7A92944C28DBA896EFA7C1B5 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				DB469B485A709EBC801B53BB /* h264-keyframe.h264 */,
+			);
+			path = Fixtures;
 			sourceTree = "<group>";
 		};
 		8BB8D219F6CBE0E023B2B5FA /* Transport */ = {
@@ -239,6 +254,7 @@
 			buildConfigurationList = 4EEEAC2C866278A658CD7253 /* Build configuration list for PBXNativeTarget "WaystoneTests" */;
 			buildPhases = (
 				B53D59AF1877FF3EF0857629 /* Sources */,
+				67DF5CEECEDBCE7578212A09 /* Resources */,
 				3047C4E82913A25CDBCA56CF /* Frameworks */,
 			);
 			buildRules = (
@@ -310,6 +326,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		67DF5CEECEDBCE7578212A09 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8F9F6CF5C5A4C30C08CA0B62 /* h264-keyframe.h264 in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		83B2B2F3B096D6C1A84340B9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -346,6 +373,8 @@
 				27402B22712707EBA14E7694 /* Instance.swift in Sources */,
 				22C32E2C73B6496305A2F8C3 /* InstanceStore.swift in Sources */,
 				18BB31479C61927EBCD1A1C6 /* Transport.swift in Sources */,
+				C2A4ECE9890BDD74765ABC42 /* VideoDecoder.swift in Sources */,
+				6120FEE06D681B3F91A7FC14 /* VideoDecoderTests.swift in Sources */,
 				5114A047D9B58A2C5309E4B6 /* Wire.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

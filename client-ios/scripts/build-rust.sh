@@ -15,19 +15,25 @@ OUT="$ROOT/client-ios/Vendor"
 
 cd "$ROOT"
 
-FLAGS=()
 if [ "$PROFILE" = "release" ]; then
-  FLAGS+=(--release)
   TARGET_DIR="release"
+  BUILD=(cargo build --release)
 else
   TARGET_DIR="debug"
+  BUILD=(cargo build)
 fi
 
+# macOS still ships bash 3.2, where `"${EMPTY[@]}"` is an unbound variable
+# under `set -u`; the build flags are therefore expanded through this helper.
+build_slice() {
+  "${BUILD[@]}" -p waystone-rtc --target "$1"
+}
+
 echo "==> device slice"
-cargo build -p waystone-rtc --target aarch64-apple-ios "${FLAGS[@]}"
+build_slice aarch64-apple-ios
 
 echo "==> simulator slice"
-cargo build -p waystone-rtc --target aarch64-apple-ios-sim "${FLAGS[@]}"
+build_slice aarch64-apple-ios-sim
 
 rm -rf "$OUT/WaystoneRTC.xcframework"
 mkdir -p "$OUT/include"

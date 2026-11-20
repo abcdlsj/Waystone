@@ -115,6 +115,8 @@ final class SessionController: ObservableObject {
     private var signaling: SignalingClient?
     private var transport: Transport?
     private var decoder: VideoDecoder?
+    /// Codec the session negotiated; the decoder needs it to parse NAL units.
+    private var negotiatedCodec = VideoToolboxSupport.preferredCodec()
     private var audio: AudioPlayer?
     private weak var videoSink: VideoView?
 
@@ -230,6 +232,7 @@ final class SessionController: ObservableObject {
         // The simulator has no HEVC decoder at all, so the codec is chosen from
         // what this device can actually decode rather than hard coded.
         let codec = VideoToolboxSupport.preferredCodec()
+        negotiatedCodec = codec
         NSLog("waystone: negotiating \(codec) video")
         let transport = Transport(
             role: "controller",
@@ -249,7 +252,9 @@ final class SessionController: ObservableObject {
         self.transport = transport
 
         signaling?.send(
-            .sessionStart(target: host.id, viewport: viewport, audio: !audioMuted))
+            .sessionStart(
+                target: host.id, viewport: viewport, audio: !audioMuted,
+                videoCodec: codec))
         _ = identity
     }
 
@@ -451,7 +456,7 @@ final class SessionController: ObservableObject {
 
     private func beginStream(hostName: String) {
         guard let transport else { return }
-        decoder = VideoDecoder()
+        decoder = VideoDecoder(codec: DecodeCodec(name: negotiatedCodec))
         decoder?.onFrame = { [weak self] buffer in
             guard let self, let sink = self.videoSink else { return }
             let size = CGSize(

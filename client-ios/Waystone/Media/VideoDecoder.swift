@@ -2,25 +2,69 @@ import AVFoundation
 import Foundation
 import VideoToolbox
 
-/// Hardware HEVC decoding straight into a Metal layer.
+/// Hardware decoding straight into a Metal layer.
 ///
 /// The frames arrive from the Rust transport as Annex-B. VideoToolbox wants AVCC
-/// (length prefixed) samples plus a `CMFormatDescription` built from the VPS/SPS/PPS
-/// inside the keyframe, so this type converts once per keyframe and then feeds the
-/// decoder with `RealTime` enabled and no reordering.
+/// (length prefixed) samples plus a `CMFormatDescription` built from the
+/// parameter sets inside the keyframe, so this type converts once per parameter
+/// set change and then feeds the decoder with `RealTime` enabled and no
+/// reordering.
+///
+/// The codec has to be known up front: HEVC and H.264 differ in how NAL types
+/// are read from the first byte and in how the format description is built, and
+/// guessing wrong drops every frame on the floor.
+enum DecodeCodec {
+    case hevc
+    case h264
+
+    init(name: String) {
+        switch name.lowercased() {
+        case "h264", "avc": self = .h264
+        default: self = .hevc
+        }
+    }
+
+    /// NAL type of a unit, read from its first header byte.
+    func nalType(_ header: UInt8) -> UInt8 {
+        switch self {
+        case .hevc: return (header >> 1) & 0x3f
+        case .h264: return header & 0x1f
+        }
+    }
+
+    /// Parameter set units, which belong in the format description.
+    func isParameterSet(_ nalType: UInt8) -> Bool {
+        switch self {
+        case .hevc: return (32...34).contains(nalType)
+        case .h264: return nalType == 7 || nalType == 8
+        }
+    }
+
+    /// True when the unit starts an independently decodable picture.
+    func isKeyframe(_ nalType: UInt8) -> Bool {
+        switch self {
+        case .hevc: return (16...21).contains(nalType)
+        case .h264: return nalType == 5
+        }
+    }
+}
+
 final class VideoDecoder {
     /// Called on the video queue with the newest decoded frame.
     var onFrame: ((CVPixelBuffer) -> Void)?
     /// Reports the decoded size so the UI can match the aspect ratio.
     var onFormatChange: ((CGSize) -> Void)?
 
+    private let codec: DecodeCodec
     private var session: VTDecompressionSession?
     private var formatDescription: CMFormatDescription?
     private var parameterSets: [[UInt8]] = []
     private let queue = DispatchQueue(label: "dev.waystone.decode", qos: .userInteractive)
     private var awaitingKeyframe = true
 
-    init() {}
+    init(codec: DecodeCodec) {
+        self.codec = codec
+    }
 
     deinit {
         if let session {
@@ -53,23 +97,23 @@ final class VideoDecoder {
         var payloadNals: [[UInt8]] = []
         for nal in nalUnits {
             guard let first = nal.first else { continue }
-            let nalType = (first >> 1) & 0x3f
-            switch nalType {
-            case 32, 33, 34:
+            let nalType = codec.nalType(first)
+            if codec.isParameterSet(nalType) {
                 currentSets.append(nal)
-            default:
+            } else {
                 payloadNals.append(nal)
-                if nalType >= 16 && nalType <= 21 {
+                if codec.isKeyframe(nalType) {
                     sawKeyframe = true
                 }
             }
         }
 
-        if !currentSets.isEmpty,
-            formatDescription == nil || currentSets != parameterSets || sawKeyframe {
-            if rebuildFormat(with: currentSets) {
-                awaitingKeyframe = true
-            }
+        // Rebuilding the format invalidates the decompression session, so it only
+        // happens when the parameter sets actually change: a repeat keyframe with
+        // identical sets decodes straight away.
+        if !currentSets.isEmpty, formatDescription == nil || currentSets != parameterSets {
+            guard rebuildFormat(with: currentSets) else { return }
+            awaitingKeyframe = true
         }
 
         guard let formatDescription, let session else {
@@ -85,14 +129,15 @@ final class VideoDecoder {
             return
         }
         var flags: VTDecodeInfoFlags = []
-        // The output is handled by the session's callback installed at creation
-        // time; this synchronous closure only needs to satisfy the API.
+        // The session was created with an output callback record, so the decode
+        // call must not pass a per-frame handler: VideoToolbox answers that
+        // combination with `kVTParameterErr` (-12902) and never decodes anything.
         let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sample,
             flags: [._EnableAsynchronousDecompression],
-            infoFlagsOut: &flags,
-            outputHandler: { _, _, _, _, _ in }
+            frameRefcon: nil,
+            infoFlagsOut: &flags
         )
         #if DEBUG
         if decodeStatus != noErr {
@@ -111,14 +156,11 @@ final class VideoDecoder {
         var format: CMFormatDescription?
         let status = pointers.withUnsafeBufferPointer { pointerBuffer in
             sizes.withUnsafeBufferPointer { sizeBuffer in
-                CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-                    allocator: nil,
-                    parameterSetCount: sets.count,
-                    parameterSetPointers: pointerBuffer.baseAddress!,
-                    parameterSetSizes: sizeBuffer.baseAddress!,
-                    nalUnitHeaderLength: 4,
-                    extensions: nil,
-                    formatDescriptionOut: &format)
+                createFormat(
+                    count: sets.count,
+                    pointers: pointerBuffer.baseAddress!,
+                    sizes: sizeBuffer.baseAddress!,
+                    format: &format)
             }
         }
         guard status == noErr, let format else { return false }
@@ -160,6 +202,33 @@ final class VideoDecoder {
         #endif
         self.session = session
         return true
+    }
+
+    private func createFormat(
+        count: Int,
+        pointers: UnsafePointer<UnsafePointer<UInt8>>,
+        sizes: UnsafePointer<Int>,
+        format: inout CMFormatDescription?
+    ) -> OSStatus {
+        switch codec {
+        case .hevc:
+            return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                allocator: nil,
+                parameterSetCount: count,
+                parameterSetPointers: pointers,
+                parameterSetSizes: sizes,
+                nalUnitHeaderLength: 4,
+                extensions: nil,
+                formatDescriptionOut: &format)
+        case .h264:
+            return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                allocator: nil,
+                parameterSetCount: count,
+                parameterSetPointers: pointers,
+                parameterSetSizes: sizes,
+                nalUnitHeaderLength: 4,
+                formatDescriptionOut: &format)
+        }
     }
 
     private static func dimensions(of format: CMFormatDescription) -> CGSize? {

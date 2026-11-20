@@ -270,7 +270,7 @@ enum Wire {
     enum ClientMessage {
         case pairRequest(token: String, device: DeviceInfo)
         case auth(identityId: String, publicKey: String, signature: String, name: String)
-        case sessionStart(target: String, viewport: Viewport, audio: Bool)
+        case sessionStart(target: String, viewport: Viewport, audio: Bool, videoCodec: String)
         case rtcSignal(sessionId: String, signal: RtcSignal)
         case sessionControl(sessionId: String, control: SessionControl)
         case sessionBye(sessionId: String, reason: String)
@@ -288,7 +288,7 @@ enum Wire {
                     "protocol_version": 1,
                     "name": name,
                 ]
-            case .sessionStart(let target, let viewport, let audio):
+            case .sessionStart(let target, let viewport, let audio, let videoCodec):
                 return [
                     "type": "session_start",
                     "target": target,
@@ -299,6 +299,9 @@ enum Wire {
                         "fps": viewport.fps,
                     ],
                     "audio": audio,
+                    // The host encodes, so it has to be told which codec this
+                    // device can decode; the SDP alone cannot express it.
+                    "video_codec": videoCodec,
                 ]
             case .rtcSignal(let sessionId, let signal):
                 return [

@@ -53,6 +53,7 @@ targets:
       - path: WaystoneTests
       - path: Waystone/Models
       - path: Waystone/Transport/Transport.swift
+      - path: Waystone/Media/VideoDecoder.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.waystone.app.tests
