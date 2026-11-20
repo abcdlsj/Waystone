@@ -27,6 +27,43 @@ use waystone_proto::Viewport;
 use crate::stun::{self, class, method, Builder, Message};
 use crate::turn::{self, Progress as TurnProgress, TurnAllocation};
 
+/// Video codec to negotiate.
+///
+/// HEVC is the default and what every supported device decodes in hardware;
+/// H.264 exists as a fallback because a few environments (notably the iOS
+/// simulator and some old browsers) have no HEVC decoder at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodec {
+    Hevc,
+    H264,
+}
+
+impl VideoCodec {
+    /// Parses the wire value used in the engine config.
+    pub fn parse(value: &str) -> VideoCodec {
+        match value.to_ascii_lowercase().as_str() {
+            "h264" | "avc" => VideoCodec::H264,
+            _ => VideoCodec::Hevc,
+        }
+    }
+
+    /// The str0m codec this maps to.
+    pub fn codec(self) -> Codec {
+        match self {
+            VideoCodec::Hevc => Codec::H265,
+            VideoCodec::H264 => Codec::H264,
+        }
+    }
+
+    /// Value used in the engine config and the FFI JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VideoCodec::Hevc => "h265",
+            VideoCodec::H264 => "h264",
+        }
+    }
+}
+
 /// Which end of a session this engine drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -94,6 +131,12 @@ pub enum Event {
     },
     /// The remote peer asked for a fresh keyframe.
     KeyframeRequest,
+    /// A frame was dropped because the session is not ready yet.
+    ///
+    /// The host uses this to retry the keyframe request: the encoder produces a
+    /// static frame only once, so dropping it silently would leave the viewer
+    /// with a black screen forever.
+    FrameDropped,
     /// The session is closed. Fatal errors are reported here too.
     Closed(String),
 }
@@ -122,6 +165,8 @@ pub struct EngineConfig {
     pub turn: Option<TurnConfig>,
     /// Local address to bind, `0.0.0.0:0` by default.
     pub bind: Option<SocketAddr>,
+    /// Codec the host encodes and the controller expects.
+    pub video_codec: VideoCodec,
     pub sink: EventSink,
 }
 
@@ -133,8 +178,14 @@ impl EngineConfig {
             stun: None,
             turn: None,
             bind: None,
+            video_codec: VideoCodec::Hevc,
             sink,
         }
+    }
+
+    pub fn with_video_codec(mut self, codec: VideoCodec) -> Self {
+        self.video_codec = codec;
+        self
     }
 
     pub fn with_session(mut self, options: SessionOptions) -> Self {
@@ -187,8 +238,12 @@ impl Engine {
     pub async fn start(config: EngineConfig) -> std::io::Result<Engine> {
         let bind = config.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
         // A single socket serves every local interface, so host candidates only
-        // differ in their IP address.
+        // differ in their IP address; the destination address of each datagram is
+        // read from the ancillary data instead.
         let socket = UdpSocket::bind(bind).await?;
+        if let Err(error) = crate::net::enable_destination_info(&socket) {
+            warn!("cannot report datagram destinations: {error}");
+        }
         let local_addr = socket.local_addr()?;
         let (tx, rx) = unbounded_channel();
         tokio::spawn(async move {
@@ -268,6 +323,8 @@ struct Driver {
     turn_peer: Option<SocketAddr>,
     relayed: bool,
     video_bitrate: u32,
+    /// Dropped frames, so the warning is logged a bounded number of times.
+    video_drop_logged: u64,
     connected: bool,
     closed: bool,
 }
@@ -279,14 +336,24 @@ impl Driver {
         rx: UnboundedReceiver<Command>,
         local_addr: SocketAddr,
     ) -> Self {
-        // Only the two codecs Waystone ships are negotiated: HEVC, which every
-        // supported device decodes in hardware, and Opus.
+        // Both HEVC and H.264 are offered: HEVC is what every supported iPhone,
+        // iPad and Mac decodes in hardware and is the preferred codec, while
+        // H.264 is the universal fallback (the iOS simulator, for instance, has
+        // no HEVC decoder at all). Opus is the only audio codec.
         let mut rtc_config = RtcConfig::new().clear_codecs();
-        rtc_config.codec_config().enable_h265(true);
+        match config.video_codec {
+            VideoCodec::Hevc => rtc_config.codec_config().enable_h265(true),
+            VideoCodec::H264 => rtc_config.codec_config().enable_h264(true),
+        }
         rtc_config.codec_config().enable_opus(true, false);
-        let rtc_config = rtc_config
-            .set_stats_interval(Some(Duration::from_secs(1)))
-            .enable_bwe(Some(str0m::bwe::Bitrate::mbps(2)));
+        // BWE is opt-in: without feedback the pacer would throttle the video to
+        // the initial estimate, so the default is a fixed high ceiling with the
+        // encoder doing the rate control.
+        let rtc_config = rtc_config.set_stats_interval(Some(Duration::from_secs(1)));
+        let rtc_config = match std::env::var_os("WAYSTONE_BWE") {
+            Some(_) => rtc_config.enable_bwe(Some(str0m::bwe::Bitrate::mbps(2))),
+            None => rtc_config,
+        };
 
         let video_bitrate = config
             .session
@@ -308,6 +375,7 @@ impl Driver {
             turn_peer: None,
             relayed: false,
             video_bitrate,
+            video_drop_logged: 0,
             connected: false,
             closed: false,
         }
@@ -327,16 +395,21 @@ impl Driver {
             tokio::pin!(sleep);
 
             let mut buf = vec![0u8; 2048];
+            // Deliberately not `biased`: with a video frame arriving every 16 ms
+            // a biased select would drain commands first and starve the socket,
+            // so TWCC feedback and NACKs would never be processed and the
+            // receiver would keep waiting for a keyframe that already went out.
             tokio::select! {
-                biased;
                 command = self.rx.recv() => match command {
                     Some(command) => self.handle_command(command),
                     None => break,
                 },
-                received = self.socket.recv_from(&mut buf) => match received {
-                    Ok((len, from)) => {
-                        buf.truncate(len);
-                        self.handle_datagram(&buf, from).await;
+                received = crate::net::recv_with_destination(&self.socket, &mut buf) => match received {
+                    Ok(datagram) => {
+                        let source = datagram.source;
+                        let destination = datagram.destination.unwrap_or(self.local_addr.ip());
+                        let payload = buf[..datagram.len].to_vec();
+                        self.handle_datagram(&payload, source, destination).await;
                     }
                     Err(error) => {
                         warn!("socket read failed: {error}");
@@ -417,14 +490,14 @@ impl Driver {
         Some(Instant::now() + turn::refresh_interval())
     }
 
-    async fn handle_datagram(&mut self, datagram: &[u8], from: SocketAddr) {
+    async fn handle_datagram(&mut self, datagram: &[u8], from: SocketAddr, destination: IpAddr) {
         // Traffic from the TURN server is either a STUN transaction response or
         // ChannelData wrapping a peer datagram.
         if self.turn.as_ref().map(|turn| turn.server()) == Some(from) {
             if let Some((_channel, payload)) = turn::parse_channel_data(datagram) {
                 let peer = self.turn_peer;
                 if let Some(peer) = peer {
-                    self.feed(payload, peer);
+                    self.feed(payload, peer, destination);
                 }
             }
             if Message::is_stun(datagram) {
@@ -444,11 +517,16 @@ impl Driver {
             let _ = self.service_turn().await;
         }
 
-        self.feed(datagram, from);
+        self.feed(datagram, from, destination);
     }
 
-    fn feed(&mut self, datagram: &[u8], from: SocketAddr) {
-        let Ok(receive) = Receive::new(Protocol::Udp, from, self.local_addr, datagram) else {
+    /// Hands one datagram to the session.
+    ///
+    /// `destination` matters: ICE drops connectivity checks that did not arrive on
+    /// a local candidate, so a wildcard socket must report the real address.
+    fn feed(&mut self, datagram: &[u8], from: SocketAddr, destination: IpAddr) {
+        let destination = SocketAddr::new(destination, self.local_addr.port());
+        let Ok(receive) = Receive::new(Protocol::Udp, from, destination, datagram) else {
             return;
         };
         self.rtc
@@ -534,7 +612,7 @@ impl Driver {
             if from != server || !Message::is_stun(&buf[..len]) {
                 // Anything else is legitimate traffic that arrived early; hand it
                 // to the session so nothing is lost.
-                self.feed(&buf[..len], from);
+                self.feed(&buf[..len], from, self.local_addr.ip());
                 continue;
             }
             let message = Message::parse(&buf[..len]).map_err(std::io::Error::other)?;
@@ -585,9 +663,6 @@ impl Driver {
     }
 
     fn handle_rtc_event(&mut self, event: RtcEvent) {
-        if std::env::var_os("WAYSTONE_TRACE_EVENTS").is_some() {
-            eprintln!("rtc event: {event:?}");
-        }
         match event {
             RtcEvent::Connected => {
                 self.connected = true;
@@ -742,15 +817,29 @@ impl Driver {
     }
 
     fn write_video(&mut self, data: Vec<u8>, rtp_time: u64) {
-        let Some(mid) = self.video_mid else { return };
-        let Some(pt) = self.payload_type(mid, Codec::H265) else {
+        let Some(mid) = self.video_mid else {
+            (self.config.sink)(Event::FrameDropped);
+            return;
+        };
+        let Some(pt) = self.payload_type(mid, self.config.video_codec.codec()) else {
+            self.video_drop_logged += 1;
+            if self.video_drop_logged <= 3 {
+                warn!(
+                    "video frame dropped: {:?} is not negotiated for {mid:?}",
+                    self.config.video_codec
+                );
+            }
+            (self.config.sink)(Event::FrameDropped);
             return;
         };
         let time = MediaTime::new(rtp_time, Frequency::NINETY_KHZ);
-        if let Some(writer) = self.rtc.writer(mid) {
-            if let Err(error) = writer.write(pt, Instant::now(), time, data) {
-                debug!("video write failed: {error}");
+        match self.rtc.writer(mid) {
+            Some(writer) => {
+                if let Err(error) = writer.write(pt, Instant::now(), time, data) {
+                    debug!("video write failed: {error}");
+                }
             }
+            None => (self.config.sink)(Event::FrameDropped),
         }
     }
 
@@ -811,28 +900,59 @@ impl Driver {
     }
 }
 
-/// Enumerates the local interface addresses.
+/// Enumerates the usable local interface addresses.
 ///
-/// A connected datagram socket makes the kernel pick the egress interface without
-/// sending anything, which is enough to learn the primary address.
+/// Every address is advertised, which is what makes a session work when the
+/// machine has several interfaces (Wi-Fi, Ethernet, a VPN tunnel). The probe
+/// socket trick is not enough: with a VPN it can select a tunnel address the peer
+/// cannot reach, and when the probe fails it yields nothing at all.
 fn local_ips() -> Vec<IpAddr> {
     let mut ips = Vec::new();
-    for probe in ["192.0.2.1:9", "198.51.100.1:9"] {
-        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-            if socket.connect(probe).is_ok() {
-                if let Ok(addr) = socket.local_addr() {
-                    let ip = addr.ip();
-                    if !ip.is_loopback() && !ip.is_unspecified() && !ips.contains(&ip) {
-                        ips.push(ip);
-                    }
-                }
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces {
+            // Tunnel interfaces carry VPN and packet filter addresses. A peer
+            // usually cannot reach them, and when the tunnel is a transparent
+            // proxy the packets are silently dropped, so they are skipped; the
+            // WiFi, Ethernet or loopback address provides the working path.
+            if is_tunnel(&interface.name) {
+                debug!("skipping tunnel interface {}", interface.name);
+                continue;
+            }
+            let ip = interface.ip();
+            if ip.is_loopback() || ip.is_unspecified() {
+                continue;
+            }
+            // Link local addresses are not routable for a viewer on another host
+            // and only produce dead candidates.
+            if match ip {
+                IpAddr::V4(v4) => v4.is_link_local(),
+                IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+            } {
+                continue;
+            }
+            if !ips.contains(&ip) {
+                ips.push(ip);
             }
         }
     }
-    if ips.is_empty() {
-        ips.push(IpAddr::from([0, 0, 0, 0]));
+    // Loopback is advertised as well: two engines on one machine (and the iOS
+    // simulator, which shares the host network namespace) can then connect
+    // without a routable interface in common. A remote peer simply fails this
+    // pair during connectivity checks.
+    let loopback: IpAddr = if ips.iter().any(|ip| ip.is_ipv4()) {
+        IpAddr::from([127, 0, 0, 1])
+    } else {
+        "::1".parse().expect("static loopback")
+    };
+    if !ips.contains(&loopback) {
+        ips.push(loopback);
     }
     ips
+}
+
+fn is_tunnel(name: &str) -> bool {
+    const PREFIXES: [&str; 8] = ["utun", "ipsec", "tun", "tap", "ppp", "awdl", "llw", "gif"];
+    PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 fn local_ip_for(_remote: IpAddr) -> IpAddr {

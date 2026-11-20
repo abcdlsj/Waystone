@@ -107,6 +107,10 @@ final class SessionController: ObservableObject {
     // MARK: - Dependencies
 
     private let store: InstanceStore
+
+    /// Instances known to the app; the controller keeps its own copy so it can
+    /// reconnect without a view passing it in.
+    var instances: [Instance] { store.instances }
     private let identity: DeviceIdentity?
     private var signaling: SignalingClient?
     private var transport: Transport?
@@ -119,13 +123,24 @@ final class SessionController: ObservableObject {
     /// Host the user tapped before the socket finished authenticating.
     private var pendingHost: String?
     private var gesture = GestureEngine()
+    #if DEBUG
+    /// Frame counter used by the debug log line above.
+    private var receivedFrames = 0
+    private var audioPackets = 0
+    #endif
     /// Relay credentials handed out by the server for this session.
     private var turn: Wire.TurnCredentials?
+    /// SDP and ICE produced before the server assigned a session id.
+    ///
+    /// The transport starts negotiating as soon as it is created, which is before
+    /// `SessionAccepted` arrives. Dropping those messages would leave the host
+    /// without a remote candidate and the DTLS handshake would time out.
+    private var pendingSignals: [Wire.RtcSignal] = []
     private var toggledKeys: Set<UInt32> = []
     private var stallTimer: Timer?
 
-    init(store: InstanceStore? = nil) {
-        self.store = store ?? InstanceStore()
+    init(store: InstanceStore) {
+        self.store = store
         self.identity = try? DeviceIdentity(loadOrCreateFor: "primary")
     }
 
@@ -175,6 +190,21 @@ final class SessionController: ObservableObject {
         signaling = nil
     }
 
+    /// Connects to the stored instance, used by the development auto-start hook.
+    func reconnectIfNeeded() {
+        guard let instance = instances.first else { return }
+        switch phase {
+        case .idle:
+            connect(to: instance)
+        case .online:
+            if let host = hosts.first(where: { $0.online }) {
+                startSession(with: host)
+            }
+        default:
+            break
+        }
+    }
+
     // MARK: - Session
 
     /// Connects to the instance if needed, then starts a session once authenticated.
@@ -197,12 +227,17 @@ final class SessionController: ObservableObject {
             fps: frameRate.rawValue
         )
 
+        // The simulator has no HEVC decoder at all, so the codec is chosen from
+        // what this device can actually decode rather than hard coded.
+        let codec = VideoToolboxSupport.preferredCodec()
+        NSLog("waystone: negotiating \(codec) video")
         let transport = Transport(
             role: "controller",
             viewport: viewport,
             audio: !audioMuted,
             stun: turn?.server ?? currentInstance?.turn,
             turn: turn.map { ($0.server, $0.username, $0.password) },
+            videoCodec: codec,
             handler: { [weak self] event in
                 Task { @MainActor in self?.handleTransport(event) }
             }
@@ -375,7 +410,10 @@ final class SessionController: ObservableObject {
             // The media graph can only be built once the server assigned a
             // session id, because every ICE candidate is relayed with it.
             beginStream(hostName: peer.name)
-            transport?.offer()
+            for signal in pendingSignals {
+                signaling?.send(.rtcSignal(sessionId: sessionId, signal: signal))
+            }
+            pendingSignals.removeAll()
 
         case .sessionRejected(let reason):
             fail(reason)
@@ -396,6 +434,7 @@ final class SessionController: ObservableObject {
             break
 
         case .sessionEnded(_, let reason, let detail):
+            NSLog("waystone: session ended: \(reason) \(detail ?? "")")
             teardown()
             phase = .ended(reason: detail ?? reason)
             lastError = detail ?? reason
@@ -440,20 +479,19 @@ final class SessionController: ObservableObject {
     private func handleTransport(_ event: Transport.Event) {
         switch event {
         case .localOffer(let sdp):
-            guard let session = currentSession else { return }
-            signaling?.send(.rtcSignal(sessionId: session, signal: .offer(sdp: sdp)))
+            sendOrBuffer(.offer(sdp: sdp))
         case .localAnswer(let sdp):
-            guard let session = currentSession else { return }
-            signaling?.send(.rtcSignal(sessionId: session, signal: .answer(sdp: sdp)))
+            sendOrBuffer(.answer(sdp: sdp))
         case .localCandidate(let candidate):
-            guard let session = currentSession else { return }
-            signaling?.send(.rtcSignal(sessionId: session, signal: .ice(candidate: candidate)))
+            sendOrBuffer(.ice(candidate: candidate))
         case .connected:
+            NSLog("waystone: transport connected")
             path.path = .direct
         case .disconnected:
+            NSLog("waystone: transport disconnected")
             path.path = .unknown
         case .mediaReady:
-            break
+            NSLog("waystone: media negotiated")
         case .pathUpdate(let rtt, let relayed, let bitrate):
             path = PathStatus(path: relayed ? .relayed : .direct, rttMs: rtt, estimatedBitrate: bitrate)
         case .keyframeRequest:
@@ -464,8 +502,20 @@ final class SessionController: ObservableObject {
             if keyframe {
                 decoder?.reset()
             }
+            #if DEBUG
+            receivedFrames += 1
+            if receivedFrames == 1 {
+                NSLog("waystone: first video frame (\(data.count) bytes, keyframe=\(keyframe))")
+            }
+            #endif
             decoder?.decode(annexB: data, rtpTime: rtpTime)
         case .audio(let data, _):
+            #if DEBUG
+            audioPackets += 1
+            if audioPackets == 1 {
+                NSLog("waystone: first audio packet (\(data.count) bytes)")
+            }
+            #endif
             audio?.enqueue(opus: data)
         case .input:
             break
@@ -473,6 +523,15 @@ final class SessionController: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Relays a signaling message, or holds it until the session id exists.
+    private func sendOrBuffer(_ signal: Wire.RtcSignal) {
+        if let session = currentSession {
+            signaling?.send(.rtcSignal(sessionId: session, signal: signal))
+        } else {
+            pendingSignals.append(signal)
+        }
+    }
 
     private func emit(_ outputs: [GestureEngine.Output]) {
         guard let transport else { return }
@@ -519,6 +578,7 @@ final class SessionController: ObservableObject {
 
     private func fail(_ reason: String) {
         pendingHost = nil
+        NSLog("waystone: session failed: \(reason)")
         lastError = reason
         phase = .ended(reason: reason)
         teardown()
@@ -536,6 +596,7 @@ final class SessionController: ObservableObject {
         audio?.stop()
         audio = nil
         currentSession = nil
+        pendingSignals.removeAll()
         toggledKeys.removeAll()
         gesture = GestureEngine()
         path = PathStatus()

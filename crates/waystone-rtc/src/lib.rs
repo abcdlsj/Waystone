@@ -12,7 +12,8 @@
 
 pub mod engine;
 pub mod ffi;
+pub mod net;
 pub mod stun;
 pub mod turn;
 
-pub use engine::{Engine, EngineConfig, Event, Role, SessionOptions};
+pub use engine::{Engine, EngineConfig, Event, Role, SessionOptions, VideoCodec};

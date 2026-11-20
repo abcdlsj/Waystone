@@ -29,6 +29,13 @@ pub struct Config {
     /// Capture resolution.
     #[serde(default = "default_size")]
     pub capture: (u32, u32),
+    /// Video codec: `h265` (default) or `h264`.
+    #[serde(default = "default_codec")]
+    pub codec: String,
+}
+
+fn default_codec() -> String {
+    "h265".to_string()
 }
 
 fn default_bitrate() -> u32 {
@@ -220,12 +227,14 @@ mod tests {
             max_bitrate: 6_000_000,
             fps: 45,
             capture: (2560, 1440),
+            codec: "h264".into(),
         };
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.endpoint, config.endpoint);
         assert_eq!(loaded.max_bitrate, 6_000_000);
         assert_eq!(loaded.capture, (2560, 1440));
+        assert_eq!(loaded.codec, "h264");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

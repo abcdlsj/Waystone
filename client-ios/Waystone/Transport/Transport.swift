@@ -32,11 +32,14 @@ final class Transport {
         audio: Bool,
         stun: String?,
         turn: (server: String, username: String, password: String)?,
+        videoCodec: String = "h265",
         handler: @escaping (Event) -> Void
     ) {
         self.handler = handler
 
-        var config: [String: Any] = ["role": role, "audio": audio]
+        var config: [String: Any] = [
+            "role": role, "audio": audio, "video_codec": videoCodec,
+        ]
         if let viewport {
             config["viewport"] = [
                 "width": viewport.width,

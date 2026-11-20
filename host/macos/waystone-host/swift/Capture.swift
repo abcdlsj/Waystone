@@ -13,8 +13,10 @@
 // AudioConverter turns it into 20 ms Opus packets.
 
 import AudioToolbox
+import CoreGraphics
 import CoreMedia
 import CoreVideo
+import IOKit.pwr_mgt
 import Foundation
 import ScreenCaptureKit
 import VideoToolbox
@@ -34,9 +36,25 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private let context: UnsafeMutableRawPointer?
     private var stream: SCStream?
     private var encoder: HEVCEncoder?
+    /// Power assertion that keeps the display awake while streaming.
+    ///
+    /// ScreenCaptureKit reports no displays at all when the screen is asleep, so
+    /// without this assertion a session started after the idle timeout fails.
+    /// It is created on a utility queue and released from `stop()`, hence the
+    /// lock around it.
+    private let assertionLock = NSLock()
+    private var sleepAssertion: IOPMAssertionID = 0
+    /// Audio buffers produced by ScreenCaptureKit, for diagnostics.
+    private var audioBuffers = 0
+    /// Most recent desktop frame.
+    ///
+    /// ScreenCaptureKit only delivers a frame when the screen changes, so a
+    /// viewer that connects while the desktop is static would wait forever. The
+    /// cached frame is re-encoded on demand to give it a picture immediately.
+    private var lastFrame: CVPixelBuffer?
+    private var lastPresentation = CMTime.zero
     private var opus: OpusEncoder?
     private var startedAt = Date()
-    private let lock = NSLock()
 
     init(callback: @escaping CaptureCallback, context: UnsafeMutableRawPointer?) {
         self.callback = callback
@@ -44,10 +62,27 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func start(width: Int, height: Int, fps: Int, bitrate: Int32) async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: false)
-        guard let display = content.displays.first else {
-            throw CaptureError.noDisplay
+        // Waking the display is delegated to a background queue: the power daemon
+        // can take seconds to answer and capture must not wait for it.
+
+        // ScreenCaptureKit occasionally reports zero displays right after the
+        // process starts or after the display wakes up, so the query is retried
+        // before giving up.
+        var display: SCDisplay?
+        for attempt in 0..<5 {
+                let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: false)
+            if let first = content.displays.first {
+                display = first
+                break
+            }
+            NSLog("waystone: no display reported, retry \(attempt + 1)")
+            try await Task.sleep(nanoseconds: 400_000_000)
+        }
+        guard let display else {
+            throw CGDisplayIsAsleep(CGMainDisplayID()) != 0
+                ? CaptureError.displayAsleep
+                : CaptureError.noDisplay
         }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -78,9 +113,19 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
         try encoder?.prepare()
-
         opus = OpusEncoder()
         try opus?.prepare()
+
+        // Both power assertions can block for tens of seconds when the power
+        // daemon is busy (or absent, e.g. in a VM), so they never run on the
+        // path that must answer within the session's timeout.
+        // Both assertions must run off the calling thread: the power daemon can
+        // block for tens of seconds, and the host agent's main thread is busy
+        // running the async runtime, so the main queue is not an option either.
+        DispatchQueue.global(qos: .utility).async {
+            Self.wakeDisplay()
+            self.holdDisplayAwake()
+        }
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
@@ -96,6 +141,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private let audioQueue = DispatchQueue(label: "dev.waystone.capture.audio", qos: .userInteractive)
 
     func stop() async {
+        releaseDisplayAwake()
         try? await stream?.stopCapture()
         stream = nil
         encoder?.finish()
@@ -103,8 +149,57 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         opus = nil
     }
 
+    /// Wakes the display, which ScreenCaptureKit requires before it will hand
+    /// out an `SCDisplay`.
+    private static func wakeDisplay() {
+        var assertion: IOPMAssertionID = 0
+        let reason = "Waystone is starting a stream" as CFString
+        IOPMAssertionDeclareUserActivity(reason, kIOPMUserActiveLocal, &assertion)
+    }
+
+    /// Prevents the display from sleeping during a session.
+    private func holdDisplayAwake() {
+        assertionLock.lock()
+        defer { assertionLock.unlock() }
+        guard sleepAssertion == 0 else { return }
+        var assertion: IOPMAssertionID = 0
+        let reason = "Waystone is streaming this display" as CFString
+        let created = IOPMAssertionCreateWithName(
+            kIOPMAssertionTypeNoDisplaySleep as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            reason,
+            &assertion)
+        if created == kIOReturnSuccess {
+            sleepAssertion = assertion
+        } else {
+            NSLog("waystone: could not hold the display awake (\(created))")
+        }
+    }
+
+    private func releaseDisplayAwake() {
+        assertionLock.lock()
+        defer { assertionLock.unlock() }
+        guard sleepAssertion != 0 else { return }
+        IOPMAssertionRelease(sleepAssertion)
+        sleepAssertion = 0
+    }
+
+    /// Sends a fresh IDR right away.
+    ///
+    /// The latest frame is re-encoded when one is available, which is the only
+    /// way to get a picture to a viewer that joined while the desktop was static.
     func requestKeyframe() {
-        encoder?.requestKeyframe()
+        guard let encoder else { return }
+        if let frame = lastFrame {
+            // A new timestamp is required: the encoder rejects a repeated one.
+            let presentation = CMTime(
+                seconds: CMClockGetTime(CMClockGetHostTimeClock()).seconds,
+                preferredTimescale: 1_000_000)
+            encoder.encode(frame, presentation: presentation, forceKeyframe: true)
+        } else {
+            // Nothing captured yet: the flag makes the next frame an IDR.
+            encoder.requestKeyframe()
+        }
     }
 
     func setBitrate(_ bitrate: Int32) {
@@ -116,8 +211,11 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         case .screen:
             guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
             let presentation = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            lastFrame = pixelBuffer
+            lastPresentation = presentation
             encoder?.encode(pixelBuffer, presentation: presentation)
         case .audio:
+            audioBuffers += 1
             opus?.encode(sampleBuffer) { [weak self] packet, microseconds in
                 guard let self else { return }
                 let callback = self.callback
@@ -137,6 +235,9 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
 enum CaptureError: Error {
     case noDisplay
+    /// The display exists but is asleep; ScreenCaptureKit reports no displays in
+    /// that state, and the message has to explain it or the user blames the app.
+    case displayAsleep
     case encoderUnavailable(OSStatus)
 }
 
@@ -156,6 +257,10 @@ final class HEVCEncoder {
     private var parameterSets: [[UInt8]] = []
 
     private var bitrate: Int32
+    /// Set by `requestKeyframe()`, consumed by the next encode call. The first
+    /// frame is always an IDR so a viewer that joins mid-stream can decode at
+    /// once instead of waiting for the periodic keyframe that never comes.
+    private var forceKeyframe = true
 
     init(width: Int, height: Int, fps: Int, bitrate: Int32, onFrame: @escaping (EncodedFrame) -> Void) {
         self.width = width
@@ -213,14 +318,24 @@ final class HEVCEncoder {
             session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
     }
 
+    /// Asks the encoder for an IDR on the next frame.
+    ///
+    /// VideoToolbox has no "emit a keyframe now" call; the request is passed as a
+    /// frame property, so the flag is consumed by `encode`.
     func requestKeyframe() {
-        guard let session else { return }
-        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        forceKeyframe = true
     }
 
-    func encode(_ buffer: CVPixelBuffer, presentation: CMTime) {
+    /// Encodes one frame, optionally forcing an IDR.
+    func encode(_ buffer: CVPixelBuffer, presentation: CMTime, forceKeyframe: Bool = false) {
         guard let session else { return }
-        let properties: CFDictionary? = nil
+        var properties: CFDictionary? = nil
+        if forceKeyframe || self.forceKeyframe {
+            self.forceKeyframe = false
+            properties = [
+                kVTEncodeFrameOptionKey_ForceKeyFrame: true
+            ] as CFDictionary
+        }
         VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: buffer,
@@ -249,17 +364,36 @@ final class HEVCEncoder {
         VTSessionSetProperty(session, key: key, value: value)
     }
 
+    /// True when the access unit contains an IRAP picture (a keyframe).
+    ///
+    /// The sample attachments are unreliable for HEVC, so the NAL types are the
+    /// source of truth: the receiver needs an IDR to start decoding anyway.
     private static func isKeyframe(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return false }
+        var length = 0
+        var pointer: UnsafeMutablePointer<Int8>?
         guard
-            let attachments = CMSampleBufferGetSampleAttachmentsArray(
-                sampleBuffer, createIfNecessary: false) as? [[CFString: Any]],
-            let first = attachments.first
-        else {
-            return true
+            CMBlockBufferGetDataPointer(
+                block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
+                dataPointerOut: &pointer) == noErr,
+            let pointer
+        else { return false }
+
+        let bytes = UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self)
+        var offset = 0
+        while offset + 6 <= length {
+            let size = Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16
+                | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3])
+            offset += 4
+            if size <= 0 || offset + size > length { break }
+            let nalType = Int((bytes[offset] >> 1) & 0x3f)
+            // IRAP types: BLA 16-18, IDR 19-20, CRA 21.
+            if (16...21).contains(nalType) {
+                return true
+            }
+            offset += size
         }
-        let notSync = first[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
-        let dependsOnOthers = first[kCMSampleAttachmentKey_DependsOnOthers] as? Bool ?? false
-        return !notSync && !dependsOnOthers
+        return false
     }
 
     /// Converts the length-prefixed AVCC sample into Annex-B, prefixing the
@@ -367,7 +501,21 @@ final class OpusEncoder {
     }
 
     private func makeConverter(input: AudioStreamBasicDescription) -> Bool {
-        var source = input
+        // The converter is always fed interleaved float32 (that is what `pending`
+        // holds), so the source description is normalized instead of echoing what
+        // ScreenCaptureKit delivered, which may be planar.
+        var source = AudioStreamBasicDescription(
+            mSampleRate: 48_000,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 8,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 8,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        _ = input
         var destination = AudioStreamBasicDescription(
             mSampleRate: 48_000,
             mFormatID: kAudioFormatOpus,
@@ -380,8 +528,9 @@ final class OpusEncoder {
             mReserved: 0
         )
         var converter: AudioConverterRef?
-        guard AudioConverterNew(&source, &destination, &converter) == noErr, let converter else {
-            NSLog("waystone: cannot create the Opus encoder")
+        let status = AudioConverterNew(&source, &destination, &converter)
+        guard status == noErr, let converter else {
+            NSLog("waystone: cannot create the Opus encoder (status \(status))")
             return false
         }
         var bitrate: UInt32 = 96_000
@@ -462,7 +611,12 @@ final class OpusEncoder {
                 nil
             )
         }
-        guard status == noErr, packets > 0, bufferList[0].mDataByteSize > 0 else { return nil }
+        guard status == noErr, packets > 0, bufferList[0].mDataByteSize > 0 else {
+            if status != noErr {
+                NSLog("waystone: opus encode failed (status \(status))")
+            }
+            return nil
+        }
         let size = Int(bufferList[0].mDataByteSize)
         guard let pointer = bufferList[0].mData else { return nil }
         return Array(UnsafeBufferPointer(start: pointer.assumingMemoryBound(to: UInt8.self), count: size))
@@ -493,7 +647,9 @@ public func ws_capture_start(
     Slot.session = session
     let ready = DispatchSemaphore(value: 0)
     var result: Int32 = -1
-    Slot.task = Task {
+    // A detached task is required: the caller blocks the calling thread on a
+    // semaphore, and a task inherited from that thread would never be scheduled.
+    Slot.task = Task.detached(priority: .userInitiated) {
         do {
             try await session.start(
                 width: Int(width), height: Int(height), fps: Int(fps), bitrate: bitrate)
@@ -504,7 +660,14 @@ public func ws_capture_start(
         }
         ready.signal()
     }
-    _ = ready.wait(timeout: .now() + 10)
+    // The first ScreenCaptureKit query after launch can take several seconds
+    // while the daemon enumerates displays, so the wait is generous; returning
+    // before the encoder exists would make the first frames fail instead.
+    let waited = ready.wait(timeout: .now() + 30)
+    if waited == .timedOut {
+        NSLog("waystone: capture did not become ready within 30s")
+        return -3
+    }
     return result
 }
 
@@ -516,7 +679,7 @@ public func ws_capture_stop() {
     Slot.session = nil
     Slot.task = nil
     let ready = DispatchSemaphore(value: 0)
-    Task {
+    Task.detached(priority: .userInitiated) {
         await session?.stop()
         _ = task
         ready.signal()

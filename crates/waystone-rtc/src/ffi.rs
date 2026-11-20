@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use waystone_proto::Viewport;
 
-use crate::engine::{sink, Engine, EngineConfig, Event, Role, SessionOptions, TurnConfig};
+use crate::engine::{
+    sink, Engine, EngineConfig, Event, Role, SessionOptions, TurnConfig, VideoCodec,
+};
 
 /// Control event: `text` is a JSON object with a `kind` field.
 pub const WS_EVENT_CONTROL: i32 = 0;
@@ -93,6 +95,8 @@ struct StartConfig {
     turn: Option<TurnJson>,
     /// Bind address; `0.0.0.0:0` by default.
     bind: Option<String>,
+    /// `h265` (default) or `h264`.
+    video_codec: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -209,6 +213,9 @@ unsafe fn start_inner(
     });
 
     let mut engine_config = EngineConfig::new(role, sink);
+    if let Some(codec) = &config.video_codec {
+        engine_config = engine_config.with_video_codec(VideoCodec::parse(codec));
+    }
     if let Some(bind) = &config.bind {
         let address = bind
             .parse()
@@ -450,6 +457,7 @@ fn control_json(event: &Event) -> Vec<u8> {
             "estimatedBitrate": estimated_bitrate,
         }),
         Event::KeyframeRequest => serde_json::json!({"kind": "keyframe_request"}),
+        Event::FrameDropped => serde_json::json!({"kind": "frame_dropped"}),
         Event::Closed(reason) => serde_json::json!({"kind": "closed", "reason": reason}),
         Event::VideoFrame { .. } | Event::AudioFrame { .. } | Event::Input { .. } => {
             // Media never reaches this path; it is handled before the match.

@@ -45,6 +45,10 @@ pub struct FrameBridge {
     audio_base: AtomicU64,
     video_seen: AtomicBool,
     audio_seen: AtomicBool,
+    /// Frames produced by the encoder, whether or not an engine was attached.
+    video_frames: AtomicU64,
+    /// Audio packets produced by the encoder.
+    audio_frames: AtomicU64,
 }
 
 impl FrameBridge {
@@ -64,6 +68,10 @@ impl FrameBridge {
 
     fn forward_video(&self, data: &[u8], timestamp_micros: u64) {
         let Some(engine) = self.engine.lock().unwrap().clone() else {
+            let missing = self.video_frames.fetch_add(1, Ordering::Relaxed);
+            if missing < 3 {
+                tracing::debug!("capture frame with no engine attached yet");
+            }
             return;
         };
         let rtp_time = self.rtp_time(timestamp_micros, &self.video_seen, &self.video_base, 90);
@@ -76,6 +84,16 @@ impl FrameBridge {
         };
         let rtp_time = self.rtp_time(timestamp_micros, &self.audio_seen, &self.audio_base, 48);
         engine.send_audio(data.to_vec(), rtp_time);
+    }
+
+    /// Number of video frames forwarded so far.
+    pub fn video_frame_count(&self) -> u64 {
+        self.video_frames.load(Ordering::Relaxed)
+    }
+
+    /// Number of audio packets forwarded so far.
+    pub fn audio_frame_count(&self) -> u64 {
+        self.audio_frames.load(Ordering::Relaxed)
     }
 
     /// Converts a capture timestamp into RTP time, rebasing on the first frame so
@@ -112,9 +130,17 @@ extern "C" fn on_capture_event(
     // The bridge outlives the capture session, so the pointer stays valid.
     let bridge = unsafe { &*(context as *const FrameBridge) };
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    // Counters are bumped before forwarding so `capture-test` can tell "the
+    // encoder produced nothing" from "no engine was attached yet".
     match kind {
-        KIND_VIDEO => bridge.forward_video(bytes, timestamp_micros),
-        KIND_AUDIO => bridge.forward_audio(bytes, timestamp_micros),
+        KIND_VIDEO => {
+            bridge.video_frames.fetch_add(1, Ordering::Relaxed);
+            bridge.forward_video(bytes, timestamp_micros);
+        }
+        KIND_AUDIO => {
+            bridge.audio_frames.fetch_add(1, Ordering::Relaxed);
+            bridge.forward_audio(bytes, timestamp_micros);
+        }
         _ => {}
     }
 }
@@ -189,6 +215,13 @@ impl Drop for Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counters_start_at_zero() {
+        let bridge = FrameBridge::new();
+        assert_eq!(bridge.video_frame_count(), 0);
+        assert_eq!(bridge.audio_frame_count(), 0);
+    }
 
     #[test]
     fn frames_are_dropped_without_an_engine() {

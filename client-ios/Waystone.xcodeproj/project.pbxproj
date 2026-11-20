@@ -36,6 +36,7 @@
 		C097A78E5302A57C24FEE140 /* InputFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78623DAFE4918F0D7649B053 /* InputFrame.swift */; };
 		C227E82BFF798DE26B1C12A9 /* WaystoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 611D3057E739D15AD3DF7216 /* WaystoneApp.swift */; };
 		CA6494EF800EB1350E56C13C /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D539CEB7F07BFF5B2B29957F /* CoreMedia.framework */; };
+		CC3AB53D24F17F34AA5944E8 /* VideoToolboxSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 885AA4E1BE23EF282ADA9A82 /* VideoToolboxSupport.swift */; };
 		CC952B7F06552354944A123B /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */; };
 		DD29D44A19F9E695BDD57EA1 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF9661F908556707DC9FB7DA /* Transport.swift */; };
 		E2688422D4E5A997409E2EEA /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01720D03C7CA7E60745AB157 /* Wire.swift */; };
@@ -71,6 +72,7 @@
 		78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoder.swift; sourceTree = "<group>"; };
 		81BEB2CFB7A6F8B1A14F6E3F /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		8510C078706589B0045E4824 /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
+		885AA4E1BE23EF282ADA9A82 /* VideoToolboxSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoToolboxSupport.swift; sourceTree = "<group>"; };
 		8E4105B45FF72EFEB73C7661 /* waystone_rtc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = waystone_rtc.h; sourceTree = "<group>"; };
 		8F21B9139DEDD50E250A9F63 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
 		913A0F9829904037060DC9F3 /* StreamView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamView.swift; sourceTree = "<group>"; };
@@ -155,6 +157,7 @@
 			children = (
 				E5BDCB3E95F40559531F8238 /* AudioPlayer.swift */,
 				78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */,
+				885AA4E1BE23EF282ADA9A82 /* VideoToolboxSupport.swift */,
 				3E02E0883D140621A66983AB /* VideoView.swift */,
 			);
 			path = Media;
@@ -325,6 +328,7 @@
 				476A71392AE86D65CA70F37D /* StreamView.swift in Sources */,
 				DD29D44A19F9E695BDD57EA1 /* Transport.swift in Sources */,
 				CC952B7F06552354944A123B /* VideoDecoder.swift in Sources */,
+				CC3AB53D24F17F34AA5944E8 /* VideoToolboxSupport.swift in Sources */,
 				9A1356972D844EBE3BB679C8 /* VideoView.swift in Sources */,
 				C227E82BFF798DE26B1C12A9 /* WaystoneApp.swift in Sources */,
 				E2688422D4E5A997409E2EEA /* Wire.swift in Sources */,

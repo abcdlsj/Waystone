@@ -68,6 +68,15 @@ enum Command {
     },
     /// Prints the current identity and configuration.
     Status,
+    /// Exercises the capture layer without a session, to check permissions.
+    CaptureTest {
+        /// How long to capture, in seconds.
+        #[arg(long, default_value_t = 3)]
+        seconds: u64,
+        /// Capture resolution, `WIDTHxHEIGHT`.
+        #[arg(long, default_value = "1280x720")]
+        capture: String,
+    },
 }
 
 #[tokio::main]
@@ -91,6 +100,7 @@ async fn main() -> Result<()> {
             bitrate,
         } => run(dir, capture, fps, bitrate).await,
         Command::Status => status(dir),
+        Command::CaptureTest { seconds, capture } => capture_test(capture, seconds).await,
     }
 }
 
@@ -139,6 +149,7 @@ async fn pair(dir: PathBuf, uri_text: String, name: Option<String>) -> Result<()
         max_bitrate: 8_000_000,
         fps: 60,
         capture: (1920, 1080),
+        codec: "h265".into(),
     };
     config.save(&dir.join("config.json"))?;
     info!("configuration written to {}", dir.display());
@@ -166,6 +177,25 @@ async fn run(dir: PathBuf, capture_spec: String, fps: u32, bitrate: u32) -> Resu
     }
 }
 
+/// Starts the capture layer, counts frames for a few seconds and reports the
+/// result, so a missing Screen Recording permission is caught before pairing.
+async fn capture_test(capture_spec: String, seconds: u64) -> Result<()> {
+    let (width, height) = parse_size(&capture_spec)?;
+    let bridge = FrameBridge::new();
+    let capture = Capture::new(bridge.clone());
+    capture.start(width, height, 60, 4_000_000)?;
+    info!("capturing {width}x{height} for {seconds}s");
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
+    capture.stop();
+    let (video, audio) = (bridge.video_frame_count(), bridge.audio_frame_count());
+    println!("captured {video} video frames and {audio} audio packets in {seconds}s");
+    if video == 0 {
+        println!("no frames: grant Screen Recording permission to this binary, then retry");
+        anyhow::bail!("capture produced no frames");
+    }
+    Ok(())
+}
+
 fn status(dir: PathBuf) -> Result<()> {
     let config = Config::load(&dir.join("config.json"))?;
     let key = DeviceKey::load_or_create(&dir.join("device.key"))?;
@@ -176,8 +206,8 @@ fn status(dir: PathBuf) -> Result<()> {
     println!("turn        {}", config.turn);
     println!("fingerprint {}", config.fingerprint);
     println!(
-        "capture     {}x{} @ {} fps",
-        config.capture.0, config.capture.1, config.fps
+        "capture     {}x{} @ {} fps ({})",
+        config.capture.0, config.capture.1, config.fps, config.codec
     );
     Ok(())
 }
@@ -195,6 +225,12 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
     let bridge = FrameBridge::new();
     let capture = Capture::new(bridge.clone());
     let mut active: Option<Active> = None;
+    // The controller starts sending SDP and ICE as soon as the server assigns a
+    // session, which is usually before capture and the encoder are ready.
+    // Dropping those messages would leave the ICE agent without a remote
+    // candidate and the DTLS handshake would time out, so everything for the
+    // current session is buffered here and replayed once the engine exists.
+    let mut pending_signals: Vec<(String, RtcSignal)> = Vec::new();
 
     loop {
         // While a session is live the engine reports progress through its own
@@ -244,7 +280,8 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 });
                 // The relay credentials are allocated by the server per session;
                 // until that is wired up the host only advertises direct paths.
-                let mut engine_config = EngineConfig::new(waystone_rtc::Role::Host, sink);
+                let mut engine_config = EngineConfig::new(waystone_rtc::Role::Host, sink)
+                    .with_video_codec(waystone_rtc::VideoCodec::parse(&config.codec));
                 if let Some(viewport) = viewport {
                     engine_config = engine_config.with_session(SessionOptions {
                         viewport,
@@ -256,11 +293,42 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 match Engine::start(engine_config).await {
                     Ok(engine) => {
                         bridge.attach(engine.clone());
+                        // VideoToolbox starts with a non-IDR frame unless it is
+                        // asked otherwise, and the controller cannot decode
+                        // anything before the first keyframe.
+                        capture.request_keyframe();
                         active = Some(Active {
-                            session_id,
+                            session_id: session_id.clone(),
                             engine,
                             events: event_rx,
+                            last_keyframe_request: std::time::Instant::now(),
                         });
+                        // Replay what arrived while capture was starting.
+                        // The offer has to be applied first: ICE candidates that
+                        // an engine receives before the remote credentials are
+                        // known cannot be matched to a ufrag and are dropped.
+                        let buffered = std::mem::take(&mut pending_signals);
+                        let mut deferred_ice = Vec::new();
+                        for (buffered_session, signal) in buffered {
+                            if buffered_session != session_id {
+                                continue;
+                            }
+                            match signal {
+                                RtcSignal::Offer { sdp } => {
+                                    info!("replaying the buffered offer");
+                                    if let Some(state) = active.as_ref() {
+                                        state.engine.accept_offer(sdp);
+                                    }
+                                }
+                                RtcSignal::Ice { candidate, .. } => deferred_ice.push(candidate),
+                                _ => {}
+                            }
+                        }
+                        if let Some(state) = active.as_ref() {
+                            for candidate in deferred_ice {
+                                state.engine.add_remote_candidate(candidate);
+                            }
+                        }
                     }
                     Err(error) => {
                         error!("cannot start the transport: {error}");
@@ -285,7 +353,10 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                     continue;
                 }
                 match rtc {
-                    RtcSignal::Offer { sdp } => state.engine.accept_offer(sdp),
+                    RtcSignal::Offer { sdp } => {
+                        info!("accepting the controller offer");
+                        state.engine.accept_offer(sdp)
+                    }
                     RtcSignal::Ice { candidate, .. } => {
                         state.engine.add_remote_candidate(candidate)
                     }
@@ -320,6 +391,8 @@ struct Active {
     session_id: String,
     engine: Engine,
     events: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    /// Last time a keyframe was requested, used to throttle the retries.
+    last_keyframe_request: std::time::Instant,
 }
 
 async fn handle_engine_event(
@@ -359,6 +432,31 @@ async fn handle_engine_event(
             }
         }
         Event::KeyframeRequest => capture.request_keyframe(),
+        Event::Connected => {
+            // Frames written before ICE and DTLS finished are dropped by the
+            // transport, so the first keyframe the encoder produced never reached
+            // the controller. Asking for a fresh IDR here is what makes the
+            // picture appear instead of staying black.
+            info!("transport connected, requesting a keyframe");
+            capture.request_keyframe();
+        }
+        Event::FrameDropped => {
+            // The engine reports this only when frames are written before the
+            // session is ready. The request is throttled: the encoder would
+            // otherwise spin, because each retry produces another dropped frame.
+            if state.last_keyframe_request.elapsed() > std::time::Duration::from_millis(250) {
+                state.last_keyframe_request = std::time::Instant::now();
+                capture.request_keyframe();
+            }
+        }
+        Event::MediaReady { video, .. } => {
+            // The mid is only known after the offer is applied, and frames that
+            // arrive earlier are dropped for want of a writer. A static desktop
+            // produces no further frames, so the controller needs this second
+            // request to receive anything at all.
+            info!("media ready ({video:?}), requesting a keyframe");
+            capture.request_keyframe();
+        }
         Event::PathUpdate {
             rtt_ms,
             relayed,

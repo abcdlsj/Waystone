@@ -72,7 +72,11 @@ final class VideoDecoder {
             }
         }
 
-        guard let formatDescription, let session else { return }
+        guard let formatDescription, let session else {
+            // Parameter sets arrive with the first keyframe; anything before it
+            // cannot be decoded and is dropped instead of being mis-parsed.
+            return
+        }
         if awaitingKeyframe && !sawKeyframe { return }
         awaitingKeyframe = false
 
@@ -83,13 +87,18 @@ final class VideoDecoder {
         var flags: VTDecodeInfoFlags = []
         // The output is handled by the session's callback installed at creation
         // time; this synchronous closure only needs to satisfy the API.
-        VTDecompressionSessionDecodeFrame(
+        let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sample,
             flags: [._EnableAsynchronousDecompression],
             infoFlagsOut: &flags,
             outputHandler: { _, _, _, _, _ in }
         )
+        #if DEBUG
+        if decodeStatus != noErr {
+            NSLog("waystone: decode failed with status \(decodeStatus)")
+        }
+        #endif
     }
 
     private func rebuildFormat(with sets: [[UInt8]]) -> Bool {
@@ -218,7 +227,9 @@ final class VideoDecoder {
         rtpTime: UInt64
     ) -> CMSampleBuffer? {
         var blockBuffer: CMBlockBuffer?
-        let memory = UnsafeMutableRawPointer.allocate(byteCount: avcc.count, alignment: 1)
+        // The block buffer takes ownership and frees the memory with `free`,
+        // so the copy has to come from malloc rather than Swift's allocator.
+        guard let memory = malloc(avcc.count) else { return nil }
         avcc.withUnsafeBytes { raw in
             memory.copyMemory(from: raw.baseAddress!, byteCount: avcc.count)
         }
@@ -233,7 +244,7 @@ final class VideoDecoder {
             flags: 0,
             blockBufferOut: &blockBuffer)
         guard created == noErr, let blockBuffer else {
-            memory.deallocate()
+            free(memory)
             return nil
         }
 
