@@ -74,6 +74,9 @@ docs/design.md           原始设计文档（中文，产品口径）
 - `src/signal.rs`：指纹固定（不走 CA 链）的 WSS 客户端
 - `src/config.rs`：设备密钥、配置持久化（0600）
 - 采集起点是「收到控制端 offer」而不是「服务端分配会话」：SCK 与编码器起来要一秒左右，之前会话可能先来 30 秒（模拟器冷启动实测），这段时间编出来的帧全被引擎丢掉，纯烧 CPU
+- 编码分辨率跟着控制端屏幕走（`stream_plan`）：把桌面塞进控制端画面所在的矩形，允许超过本机 `--capture`（真机是 Retina，采集层是从面板像素降采样，所以按控制端尺寸出流才是 1:1），上限 2 倍并再被 Swift 侧按面板点数 ×2 夹一次。码率按像素数等比缩放（3 Mbps 下限 / 16 Mbps 上限）
+- 编码器尺寸必须与 SCK 实际交付的尺寸一致，否则 VideoToolbox 会替每帧做一次重采样，画面白白变糊（之前就是 2144x1206 的会话配 1512x850 的帧）
+- 关键帧请求做了 250ms 去抖：`Connected`、两次 `MediaReady`、控制端 PLI 会在几毫秒内同时到达，之前每来一个就重编码一次缓存帧，连发三个 200KB 的突发正好是那种看得见的卡顿
 - CLI：`pair <uri>` / `run` / `status` / `capture-test`（`capture-test` 用于在配对前验证录屏权限）
 - 排障开关：`WAYSTONE_DUMP_FRAMES=<dir>` 把编码后的前 40 帧（`.h264`/`.h265`）落盘，可在 App 之外复现解码问题
 
@@ -86,6 +89,7 @@ docs/design.md           原始设计文档（中文，产品口径）
 - `AudioPlayer`：`AVAudioEngine` + 自建 20ms 环形缓冲
 - `SignalingClient`：`URLSessionWebSocketTask` + 证书指纹固定
 - codec 自适应：`VTIsHardwareDecodeSupported(HEVC)` 决定协商 HEVC 还是 H.264（模拟器无 HEVC 解码器），并通过 `session_start.video_codec` 告诉被控端该编哪种码
+- 解码有背压：在途帧超过 2 帧就跳过非关键帧（关键帧例外），否则解码慢一点就会把队列越堆越长，表现为「不卡但延迟越来越大」。跳过数、解码数、收包数每秒打一条 DEBUG 日志（`waystone: rx +N/s decoded +N/s dropped +N/s`），用来区分「网络慢 / 解码慢 / 渲染慢」
 
 ### 3.6 视频 codec 的一次会话内协商
 
@@ -150,7 +154,8 @@ SIMCTL_CHILD_WAYSTONE_AUTO_CONNECT=1 xcrun simctl launch <设备> dev.waystone.a
 | 自动锁屏 | 会话结束时锁屏；macOS 未实现 |
 | 音频静音联动 | iOS 侧静音开关已做，被控端静音未做 |
 | 敏锐度校准 | 手势阈值（160ms / 8pt）未做真机调参，模拟器无法验证手感 |
-| 文字观感 | H.264 在 4:2:0 下文字边缘会有轻微彩影。已把解码帧与真实屏幕 1:1 对比过：编码侧正常，看到的「重影」是缩略图/缩放造成的放大效应，不是 bug。真机 HEVC 观感未验证 |
+| 模拟器性能 | 模拟器的 Metal 与 60fps 大画面解码本身就是这台机器上最慢的一环；同样码流在真机上未测。若要在模拟器上判断「卡」是不是编码/网络造成的，看每秒的 `rx/decoded/dropped`：rx 稳在 55~60 且 dropped 很小就说明问题在渲染侧 |
+| 采集源分辨率 | 这台机器的 CG 面板是 1512x982 点（Retina 2 倍即 3024x1964），抓到的桌面细节上限就是面板像素；控制端可能仍然比它大，此时放大不可避免 |
 
 ### P2 — 工程化缺口
 

@@ -126,9 +126,13 @@ final class SessionController: ObservableObject {
     private var pendingHost: String?
     private var gesture = GestureEngine()
     #if DEBUG
-    /// Frame counter used by the debug log line above.
+    /// Frame counters for the once per second throughput log.
     private var receivedFrames = 0
     private var audioPackets = 0
+    private var reportedFrames = 0
+    private var reportedDecoded = 0
+    private var reportedDropped = 0
+    private var throughputTimer: Timer?
     #endif
     /// Relay credentials handed out by the server for this session.
     private var turn: Wire.TurnCredentials?
@@ -479,6 +483,9 @@ final class SessionController: ObservableObject {
 
         phase = .streaming(hostName: hostName)
         startStallWatchdog()
+        #if DEBUG
+        startThroughputLog()
+        #endif
     }
 
     private func handleTransport(_ event: Transport.Event) {
@@ -593,6 +600,10 @@ final class SessionController: ObservableObject {
     private func teardown() {
         stallTimer?.invalidate()
         stallTimer = nil
+        #if DEBUG
+        throughputTimer?.invalidate()
+        throughputTimer = nil
+        #endif
         // Releasing held keys prevents a stuck Ctrl on the host.
         transport?.sendInput(InputFrame.releaseAll(), reliable: true)
         transport?.stop()
@@ -607,6 +618,31 @@ final class SessionController: ObservableObject {
         path = PathStatus()
         videoSink?.clear()
     }
+
+    #if DEBUG
+    /// Logs how many frames arrive, decode and get skipped every second.
+    ///
+    /// This is the only way to tell "the network is slow" from "the decoder is
+    /// behind" from "the renderer cannot keep up" on a device.
+    private func startThroughputLog() {
+        throughputTimer?.invalidate()
+        reportedFrames = 0
+        reportedDecoded = 0
+        reportedDropped = 0
+        throughputTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let decoded = self.decoder?.decodedCount ?? 0
+            let dropped = self.decoder?.droppedCount ?? 0
+            NSLog(
+                "waystone: rx +\(self.receivedFrames - self.reportedFrames)/s "
+                    + "decoded +\(decoded - self.reportedDecoded)/s "
+                    + "dropped +\(dropped - self.reportedDropped)/s")
+            self.reportedFrames = self.receivedFrames
+            self.reportedDecoded = decoded
+            self.reportedDropped = dropped
+        }
+    }
+    #endif
 
     /// Shows the recovery banner when frames stop for three seconds.
     private func startStallWatchdog() {

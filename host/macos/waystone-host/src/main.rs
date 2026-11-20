@@ -268,7 +268,12 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 // offer must agree: a mismatch leaves the viewer with audio and
                 // a permanently black picture.
                 let codec = video_codec.as_deref().unwrap_or(&config.codec).to_string();
-                info!("session codec is {codec}");
+                debug!("controller viewport {viewport:?}");
+                let plan = stream_plan(config, viewport);
+                info!(
+                    "session codec is {codec}, streaming {}x{} at {} bit/s",
+                    plan.width, plan.height, plan.bitrate
+                );
 
                 let (event_tx, event_rx) = unbounded_channel();
                 let sink = sink(move |event: Event| {
@@ -282,7 +287,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                     engine_config = engine_config.with_session(SessionOptions {
                         viewport,
                         audio,
-                        max_video_bitrate: config.max_bitrate,
+                        max_video_bitrate: plan.bitrate,
                     });
                 }
 
@@ -298,6 +303,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                             session_id: session_id.clone(),
                             engine: engine.clone(),
                             codec: codec.clone(),
+                            plan,
                             events: event_rx,
                             last_keyframe_request: std::time::Instant::now(),
                         });
@@ -315,7 +321,9 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                                 RtcSignal::Offer { sdp } => {
                                     info!("replaying the buffered offer");
                                     engine.accept_offer(sdp);
-                                    if let Err(error) = start_capture(&capture, config, &codec) {
+                                    if let Err(error) =
+                                        start_capture(&capture, config, &codec, &plan)
+                                    {
                                         error!("capture failed: {error}");
                                     }
                                 }
@@ -345,7 +353,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
             } => {
                 // Everything the handler needs is cloned out first, so the borrow
                 // on `active` ends before a failure path may tear the session down.
-                let Some((active_id, engine, codec)) = active
+                let Some((active_id, engine, codec, plan)) = active
                     .as_ref()
                     .filter(|state| state.session_id == session_id)
                     .map(|state| {
@@ -353,6 +361,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                             state.session_id.clone(),
                             state.engine.clone(),
                             state.codec.clone(),
+                            state.plan,
                         )
                     })
                 else {
@@ -364,7 +373,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                         // The answer goes out first: starting the capture layer
                         // blocks for a moment and the controller is waiting.
                         engine.accept_offer(sdp);
-                        if let Err(error) = start_capture(&capture, config, &codec) {
+                        if let Err(error) = start_capture(&capture, config, &codec, &plan) {
                             error!("capture failed: {error}");
                             let _ = signal
                                 .send(&ClientMessage::SessionBye {
@@ -408,6 +417,8 @@ struct Active {
     engine: Engine,
     /// Codec this session encodes with, chosen by the controller.
     codec: String,
+    /// Size and bitrate the capture layer is started with.
+    plan: StreamPlan,
     events: tokio::sync::mpsc::UnboundedReceiver<Event>,
     /// Last time a keyframe was requested, used to throttle the retries.
     last_keyframe_request: std::time::Instant,
@@ -420,16 +431,65 @@ struct Active {
 /// everything they produce before the media sections exist is dropped, so
 /// starting early only burns CPU (the simulator was seen asking for a session 30
 /// seconds before sending the offer).
-fn start_capture(capture: &Capture, config: &Config, codec: &str) -> Result<()> {
+fn start_capture(capture: &Capture, config: &Config, codec: &str, plan: &StreamPlan) -> Result<()> {
     if capture.is_running() {
         return Ok(());
     }
-    let (width, height) = config.capture;
     info!(
-        "starting capture {width}x{height} @ {} fps, encoding {codec}",
-        config.fps
+        "starting capture {}x{} @ {} fps, {} bit/s, encoding {codec}",
+        plan.width, plan.height, config.fps, plan.bitrate
     );
-    capture.start(width, height, config.fps, config.max_bitrate, codec)
+    capture.start(plan.width, plan.height, config.fps, plan.bitrate, codec)
+}
+
+/// Encoded size and encoder bitrate for one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StreamPlan {
+    width: u32,
+    height: u32,
+    bitrate: u32,
+}
+
+/// Fits the captured desktop into the controller's screen.
+///
+/// The phone is the only device that knows how big the picture is drawn, and it
+/// draws it edge to edge. Encoding at its pixel size removes a resampling step
+/// (the desktop is scaled once, by the capture layer, instead of once here and
+/// again on the phone), which is what makes text look sharp, and it leaves about
+/// 60% fewer pixels to encode on a handheld screen.
+fn stream_plan(config: &Config, viewport: Option<waystone_proto::Viewport>) -> StreamPlan {
+    let (mut width, mut height) = config.capture;
+    if let Some(viewport) = viewport {
+        if viewport.width > 0 && viewport.height > 0 {
+            // Fit the desktop into the box the controller draws it in. The app
+            // can be landscape or portrait, and the box follows the device. A
+            // fit larger than the configured capture size is intentional: on a
+            // Retina display the capture layer downsamples from the panel, and
+            // matching the box means the phone scales nothing on its own.
+            let width_scale = viewport.width as f32 / width as f32;
+            let height_scale = viewport.height as f32 / height as f32;
+            // The cap keeps a bogus viewport from asking for an absurd stream;
+            // the capture layer additionally clamps to the real display size.
+            let scale = width_scale.min(height_scale).min(2.0);
+            width = ((width as f32 * scale).round() as u32).max(2);
+            height = ((height as f32 * scale).round() as u32).max(2);
+        }
+    }
+    // Video encoders work on macroblocks, so the geometry has to be even.
+    let (width, height) = (width & !1, height & !1);
+
+    // The configured ceiling is what 1920x1080 needs, so a different geometry
+    // scales with it; the floor keeps text legible on a small picture.
+    let base_pixels = 1920 * 1080;
+    let pixels = width as u64 * height as u64;
+    let scaled = (config.max_bitrate as u64 * pixels / base_pixels) as u32;
+    let bitrate = scaled.clamp(3_000_000, 16_000_000);
+
+    StreamPlan {
+        width,
+        height,
+        bitrate,
+    }
 }
 
 async fn handle_engine_event(
@@ -468,23 +528,23 @@ async fn handle_engine_event(
                 debug!("input frame rejected");
             }
         }
-        Event::KeyframeRequest => capture.request_keyframe(),
+        Event::KeyframeRequest => {
+            info!("controller asked for a keyframe");
+            request_keyframe(state, capture);
+        }
         Event::Connected => {
             // Frames written before ICE and DTLS finished are dropped by the
             // transport, so the first keyframe the encoder produced never reached
             // the controller. Asking for a fresh IDR here is what makes the
             // picture appear instead of staying black.
             info!("transport connected, requesting a keyframe");
-            capture.request_keyframe();
+            request_keyframe(state, capture);
         }
         Event::FrameDropped => {
             // The engine reports this only when frames are written before the
-            // session is ready. The request is throttled: the encoder would
-            // otherwise spin, because each retry produces another dropped frame.
-            if state.last_keyframe_request.elapsed() > std::time::Duration::from_millis(250) {
-                state.last_keyframe_request = std::time::Instant::now();
-                capture.request_keyframe();
-            }
+            // session is ready. The encoder would otherwise spin, because each
+            // retry produces another dropped frame.
+            request_keyframe(state, capture);
         }
         Event::MediaReady { video, .. } => {
             // The mid is only known after the offer is applied, and frames that
@@ -492,18 +552,27 @@ async fn handle_engine_event(
             // produces no further frames, so the controller needs this second
             // request to receive anything at all.
             info!("media ready ({video:?}), requesting a keyframe");
-            capture.request_keyframe();
+            request_keyframe(state, capture);
         }
         Event::PathUpdate {
             rtt_ms,
             relayed,
             estimated_bitrate,
         } => {
-            if relayed {
-                capture.set_bitrate(4_000_000);
+            // Never exceed what this session's geometry was planned for: the
+            // default here used to jump back to the 1920x1080 ceiling and undo
+            // the scaling for a smaller picture.
+            let ceiling = if relayed {
+                state.plan.bitrate.min(4_000_000)
             } else {
-                capture.set_bitrate(estimated_bitrate.unwrap_or(8_000_000).max(1_000_000));
-            }
+                state.plan.bitrate
+            };
+            capture.set_bitrate(
+                estimated_bitrate
+                    .unwrap_or(ceiling)
+                    .min(ceiling)
+                    .max(1_000_000),
+            );
             debug!("path update rtt={rtt_ms:?} relayed={relayed}");
         }
         Event::Closed(reason) => {
@@ -521,6 +590,19 @@ async fn handle_engine_event(
         other => debug!("engine event: {other:?}"),
     }
     Ok(())
+}
+
+/// Asks the encoder for an IDR, at most every 250 ms.
+///
+/// Connected, MediaReady and a controller PLI all arrive within a few
+/// milliseconds of each other; without the throttle each one re-encodes the
+/// cached frame, and three 200 KB bursts in a row is exactly the kind of queue
+/// that shows up as a stutter.
+fn request_keyframe(state: &mut Active, capture: &Capture) {
+    if state.last_keyframe_request.elapsed() > std::time::Duration::from_millis(250) {
+        state.last_keyframe_request = std::time::Instant::now();
+        capture.request_keyframe();
+    }
 }
 
 fn stop_active(bridge: &Arc<FrameBridge>, capture: &Capture, active: &mut Option<Active>) {
@@ -586,6 +668,58 @@ mod tests {
         assert_eq!(parse_size("2560X1440").unwrap(), (2560, 1440));
         assert!(parse_size("1920").is_err());
         assert!(parse_size("axb").is_err());
+    }
+
+    fn test_config() -> Config {
+        Config {
+            endpoint: "example:8443".into(),
+            turn: "example:3478".into(),
+            fingerprint: "a".repeat(64),
+            name: "Mac Studio".into(),
+            max_bitrate: 8_000_000,
+            fps: 60,
+            capture: (1920, 1080),
+            codec: "h265".into(),
+        }
+    }
+
+    fn viewport(width: u32, height: u32) -> waystone_proto::Viewport {
+        waystone_proto::Viewport {
+            width,
+            height,
+            dpi: 460,
+            fps: 60,
+        }
+    }
+
+    #[test]
+    fn stream_plan_fits_the_controller_screen() {
+        let config = test_config();
+        // Portrait: the desktop is drawn 1206 pixels wide.
+        let plan = stream_plan(&config, Some(viewport(1206, 2622)));
+        assert_eq!((plan.width, plan.height), (1206, 678));
+        assert!((3_000_000..=8_000_000).contains(&plan.bitrate));
+
+        // Landscape: the box is taller than the desktop is, so the height is the
+        // limit and the stream grows to what the phone actually draws.
+        let plan = stream_plan(&config, Some(viewport(2622, 1206)));
+        assert_eq!((plan.width, plan.height), (2144, 1206));
+    }
+
+    #[test]
+    fn stream_plan_keeps_even_dimensions_and_a_sane_ceiling() {
+        let config = test_config();
+        // A bogus viewport cannot ask for more than twice the configured size.
+        let plan = stream_plan(&config, Some(viewport(5120, 4096)));
+        assert_eq!((plan.width, plan.height), (3840, 2160));
+
+        // An odd fit is rounded down to an even geometry.
+        let plan = stream_plan(&config, Some(viewport(1601, 2000)));
+        assert_eq!(plan.width % 2, 0);
+        assert_eq!(plan.height % 2, 0);
+
+        let plan = stream_plan(&config, None);
+        assert_eq!((plan.width, plan.height), (1920, 1080));
     }
 
     #[test]

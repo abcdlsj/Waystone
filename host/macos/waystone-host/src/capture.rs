@@ -50,6 +50,8 @@ pub struct FrameBridge {
     video_frames: AtomicU64,
     /// Audio packets produced by the encoder.
     audio_frames: AtomicU64,
+    /// Video frames handed to the engine.
+    forwarded_video: AtomicU64,
 }
 
 impl FrameBridge {
@@ -76,6 +78,10 @@ impl FrameBridge {
             return;
         };
         let rtp_time = self.rtp_time(timestamp_micros, &self.video_seen, &self.video_base, 90);
+        let forwarded = self.forwarded_video.fetch_add(1, Ordering::Relaxed) + 1;
+        if forwarded % 60 == 0 {
+            tracing::debug!("forwarded {forwarded} video frames");
+        }
         engine.send_video(data.to_vec(), rtp_time);
     }
 

@@ -61,6 +61,30 @@ final class VideoDecoder {
     private var parameterSets: [[UInt8]] = []
     private let queue = DispatchQueue(label: "dev.waystone.decode", qos: .userInteractive)
     private var awaitingKeyframe = true
+    /// Frames handed to VideoToolbox and not answered yet. Bounding this keeps
+    /// the pipeline honest: a decoder that falls behind would otherwise queue
+    /// every frame and turn latency into seconds of lag.
+    private let stateLock = NSLock()
+    private var outstanding = 0
+    private var decodedFrames = 0
+    private var droppedFrames = 0
+
+    /// Decoded frames so far.
+    var decodedCount: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return decodedFrames
+    }
+
+    /// Frames skipped because the decoder was still busy.
+    var droppedCount: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return droppedFrames
+    }
+
+    /// How many frames may be in flight before non-keyframes are skipped.
+    private static let maximumOutstanding = 2
 
     init(codec: DecodeCodec) {
         self.codec = codec
@@ -124,7 +148,24 @@ final class VideoDecoder {
         if awaitingKeyframe && !sawKeyframe { return }
         awaitingKeyframe = false
 
-        guard let avcc = Self.toAVCC(payloadNals) else { return }
+        // Only the newest frame matters: decoding a backlog adds latency instead
+        // of smoothing playback. Keyframes always go through, because skipping
+        // one costs the picture until the next one arrives.
+        stateLock.lock()
+        if !sawKeyframe && outstanding >= Self.maximumOutstanding {
+            droppedFrames += 1
+            stateLock.unlock()
+            return
+        }
+        outstanding += 1
+        stateLock.unlock()
+
+        guard let avcc = Self.toAVCC(payloadNals) else {
+            stateLock.lock()
+            outstanding = max(0, outstanding - 1)
+            stateLock.unlock()
+            return
+        }
         guard var sample = Self.makeSampleBuffer(avcc, format: formatDescription, rtpTime: rtpTime) else {
             return
         }
@@ -144,6 +185,11 @@ final class VideoDecoder {
             NSLog("waystone: decode failed with status \(decodeStatus)")
         }
         #endif
+        if decodeStatus != noErr {
+            stateLock.lock()
+            outstanding = max(0, outstanding - 1)
+            stateLock.unlock()
+        }
     }
 
     private func rebuildFormat(with sets: [[UInt8]]) -> Bool {
@@ -180,9 +226,9 @@ final class VideoDecoder {
         // where they go straight to the Metal view.
         let outputCallback: VTDecompressionOutputCallbackRecord = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: { refcon, _, status, _, imageBuffer, _, _ in
-                guard status == noErr, let refcon, let imageBuffer else { return }
+                guard let refcon else { return }
                 let decoder = Unmanaged<VideoDecoder>.fromOpaque(refcon).takeUnretainedValue()
-                decoder.handleDecoded(imageBuffer)
+                decoder.handleDecoded(status: status, imageBuffer: imageBuffer)
             },
             decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
         )
@@ -237,9 +283,17 @@ final class VideoDecoder {
         return CGSize(width: Int(dimensions.width), height: Int(dimensions.height))
     }
 
-    /// Called by VideoToolbox on a decoder thread.
-    fileprivate func handleDecoded(_ imageBuffer: CVImageBuffer) {
-        guard let pixelBuffer = imageBuffer as CVPixelBuffer? else { return }
+    /// Called by VideoToolbox on a decoder thread, for every frame it finishes
+    /// with, including the ones it failed to decode.
+    fileprivate func handleDecoded(status: OSStatus, imageBuffer: CVImageBuffer?) {
+        stateLock.lock()
+        outstanding = max(0, outstanding - 1)
+        if status == noErr, imageBuffer != nil {
+            decodedFrames += 1
+        }
+        stateLock.unlock()
+
+        guard status == noErr, let pixelBuffer = imageBuffer as CVPixelBuffer? else { return }
         onFrame?(pixelBuffer)
     }
 

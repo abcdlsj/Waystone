@@ -15,6 +15,7 @@ final class VideoView: UIView {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private var pipeline: MTLRenderPipelineState?
+    private var sampler: MTLSamplerState?
     private var textureCache: CVMTextureCache?
     private var pending: CVPixelBuffer?
     private let drawLock = NSLock()
@@ -52,6 +53,12 @@ final class VideoView: UIView {
         metalLayer.isOpaque = true
         metalLayer.backgroundColor = UIColor.black.cgColor
         textureCache = CVMTextureCache(device: device)
+        // One sampler for the lifetime of the view: creating it per frame is a
+        // surprising amount of work at 60 Hz, especially on a simulator.
+        let samplerDescriptor = MTLSamplerDescriptor()
+        samplerDescriptor.minFilter = .linear
+        samplerDescriptor.magFilter = .linear
+        sampler = device.makeSamplerState(descriptor: samplerDescriptor)
         buildPipeline()
     }
 
@@ -118,7 +125,7 @@ final class VideoView: UIView {
         let buffer = pending
         pending = nil
         drawLock.unlock()
-        guard let buffer, let pipeline, let textureCache else { return }
+        guard let buffer, let pipeline, let sampler, let textureCache else { return }
 
         guard let texture = textureCache.texture(for: buffer) else { return }
         guard let drawable = metalLayer.nextDrawable() else { return }
@@ -132,14 +139,9 @@ final class VideoView: UIView {
             let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)
         else { return }
 
-        let sampler = MTLSamplerDescriptor()
-        sampler.minFilter = .linear
-        sampler.magFilter = .linear
-        guard let samplerState = device.makeSamplerState(descriptor: sampler) else { return }
-
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(texture, index: 0)
-        encoder.setFragmentSamplerState(samplerState, index: 0)
+        encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
         commandBuffer.present(drawable)

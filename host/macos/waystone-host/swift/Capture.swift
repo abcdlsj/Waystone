@@ -85,10 +85,23 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
                 : CaptureError.noDisplay
         }
 
+        // `SCDisplay` measures the panel in points, and a Retina panel has two
+        // pixels per point, so twice the point size is the largest capture that
+        // can carry real detail. Anything beyond that only invents pixels.
+        let panelWidth = display.width * 2
+        let panelHeight = display.height * 2
+        let fit = min(
+            1.0,
+            min(Double(panelWidth) / Double(width), Double(panelHeight) / Double(height)))
+        let targetWidth = Int((Double(width) * fit).rounded()) & ~1
+        let targetHeight = Int((Double(height) * fit).rounded()) & ~1
+        if fit < 1.0 {
+            NSLog("waystone: capture clamped to \(targetWidth)x\(targetHeight)")
+        }
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
-        configuration.width = width
-        configuration.height = height
+        configuration.width = targetWidth
+        configuration.height = targetHeight
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.scalesToFit = true
@@ -99,7 +112,12 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.excludesCurrentProcessAudio = true
         configuration.queueDepth = 3
 
-        encoder = VideoEncoder(codec: codec, width: width, height: height, fps: fps, bitrate: bitrate) { [weak self] frame in
+        // The encoder must be configured for what ScreenCaptureKit will actually
+        // deliver, otherwise VideoToolbox rescales every frame and the picture
+        // comes out soft for no reason.
+        encoder = VideoEncoder(
+            codec: codec, width: targetWidth, height: targetHeight, fps: fps, bitrate: bitrate
+        ) { [weak self] frame in
             guard let self, let callback = Optional(self.callback) else { return }
             frame.data.withUnsafeBufferPointer { buffer in
                 callback(
@@ -360,9 +378,9 @@ final class VideoEncoder {
         setProperty(kVTCompressionPropertyKey_MaxKeyFrameInterval, 0 as CFNumber)
         setProperty(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         setProperty(kVTCompressionPropertyKey_ExpectedFrameRate, 60 as CFNumber)
-        if #available(macOS 14.0, *) {
-            setProperty(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue)
-        }
+        // Deliberately left at the default: the picture is mostly text, and
+        // trading quality for encoder speed smears glyph edges, which on a phone
+        // is the first thing the eye notices.
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
