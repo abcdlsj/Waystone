@@ -5,7 +5,7 @@
 // the hot path of the stream, so the design is:
 //
 //   ScreenCaptureKit (IOSurface, NV12)
-//     -> VideoToolbox HEVC (no B frames, no look-ahead)
+//     -> VideoToolbox HEVC or H.264 (no B frames, no look-ahead)
 //     -> AVCC to Annex-B conversion
 //     -> one C callback per frame
 //
@@ -35,7 +35,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private let callback: CaptureCallback
     private let context: UnsafeMutableRawPointer?
     private var stream: SCStream?
-    private var encoder: HEVCEncoder?
+    private var encoder: VideoEncoder?
     /// Power assertion that keeps the display awake while streaming.
     ///
     /// ScreenCaptureKit reports no displays at all when the screen is asleep, so
@@ -61,7 +61,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         self.context = context
     }
 
-    func start(width: Int, height: Int, fps: Int, bitrate: Int32) async throws {
+    func start(width: Int, height: Int, fps: Int, bitrate: Int32, codec: EncodeCodec) async throws {
         // Waking the display is delegated to a background queue: the power daemon
         // can take seconds to answer and capture must not wait for it.
 
@@ -99,7 +99,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.excludesCurrentProcessAudio = true
         configuration.queueDepth = 3
 
-        encoder = HEVCEncoder(width: width, height: height, fps: fps, bitrate: bitrate) { [weak self] frame in
+        encoder = VideoEncoder(codec: codec, width: width, height: height, fps: fps, bitrate: bitrate) { [weak self] frame in
             guard let self, let callback = Optional(self.callback) else { return }
             frame.data.withUnsafeBufferPointer { buffer in
                 callback(
@@ -248,13 +248,64 @@ struct EncodedFrame {
     let timestampMicros: UInt64
 }
 
-/// VideoToolbox HEVC encoder configured for latency, not for file size.
-final class HEVCEncoder {
+/// Which bitstream the encoder produces.
+///
+/// HEVC is the default because every supported iPhone, iPad and Mac decodes it in
+/// hardware at roughly half the bitrate of H.264. H.264 exists for the
+/// environments without an HEVC decoder (the iOS simulator is the one that
+/// matters in practice), and the controller picks the codec per session because
+/// only it knows what it can decode.
+enum EncodeCodec {
+    case hevc
+    case h264
+
+    var codecType: CMVideoCodecType {
+        switch self {
+        case .hevc: return kCMVideoCodecType_HEVC
+        case .h264: return kCMVideoCodecType_H264
+        }
+    }
+
+    var profileLevel: CFString {
+        switch self {
+        case .hevc: return kVTProfileLevel_HEVC_Main_AutoLevel
+        case .h264: return kVTProfileLevel_H264_High_AutoLevel
+        }
+    }
+
+    /// NAL type of the access unit, read from its first byte.
+    func nalType(_ header: UInt8) -> Int {
+        switch self {
+        case .hevc: return Int((header >> 1) & 0x3f)
+        case .h264: return Int(header & 0x1f)
+        }
+    }
+
+    /// True when a NAL type starts an independently decodable picture.
+    func isKeyframeNal(_ nalType: Int) -> Bool {
+        switch self {
+        case .hevc:
+            // IRAP types: BLA 16-18, IDR 19-20, CRA 21.
+            return (16...21).contains(nalType)
+        case .h264:
+            // IDR slice.
+            return nalType == 5
+        }
+    }
+}
+
+/// VideoToolbox encoder configured for latency, not for file size.
+final class VideoEncoder {
     private var session: VTCompressionSession?
+    private let codec: EncodeCodec
     private let width: Int
     private let height: Int
     private let onFrame: (EncodedFrame) -> Void
     private var parameterSets: [[UInt8]] = []
+    /// Frames logged so far; bounded so a long session stays quiet.
+    private var logged = 0
+    /// Frames written to `WAYSTONE_DUMP_FRAMES`, also bounded.
+    private var dumped = 0
 
     private var bitrate: Int32
     /// Set by `requestKeyframe()`, consumed by the next encode call. The first
@@ -262,7 +313,11 @@ final class HEVCEncoder {
     /// once instead of waiting for the periodic keyframe that never comes.
     private var forceKeyframe = true
 
-    init(width: Int, height: Int, fps: Int, bitrate: Int32, onFrame: @escaping (EncodedFrame) -> Void) {
+    init(
+        codec: EncodeCodec, width: Int, height: Int, fps: Int, bitrate: Int32,
+        onFrame: @escaping (EncodedFrame) -> Void
+    ) {
+        self.codec = codec
         self.width = width
         self.height = height
         self.bitrate = bitrate
@@ -284,7 +339,7 @@ final class HEVCEncoder {
             allocator: nil,
             width: Int32(width),
             height: Int32(height),
-            codecType: kCMVideoCodecType_HEVC,
+            codecType: codec.codecType,
             encoderSpecification: specification as CFDictionary,
             imageBufferAttributes: attributes as CFDictionary,
             compressedDataAllocator: nil,
@@ -301,7 +356,7 @@ final class HEVCEncoder {
         // keyframes only on request.
         setProperty(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         setProperty(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        setProperty(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel)
+        setProperty(kVTCompressionPropertyKey_ProfileLevel, codec.profileLevel)
         setProperty(kVTCompressionPropertyKey_MaxKeyFrameInterval, 0 as CFNumber)
         setProperty(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         setProperty(kVTCompressionPropertyKey_ExpectedFrameRate, 60 as CFNumber)
@@ -345,9 +400,23 @@ final class HEVCEncoder {
             infoFlagsOut: nil
         ) { [weak self] status, flags, sampleBuffer in
             guard let self, status == noErr, let sampleBuffer else { return }
-            let keyframe = !flags.contains(.frameDropped) && Self.isKeyframe(sampleBuffer)
+            let keyframe = !flags.contains(.frameDropped) && self.isKeyframe(sampleBuffer)
             let micros = UInt64(max(0, CMTimeGetSeconds(presentation)) * 1_000_000)
             guard let annexB = self.toAnnexB(sampleBuffer, keyframe: keyframe) else { return }
+            if self.logged < 12 {
+                self.logged += 1
+                NSLog("waystone: encoded \(annexB.count) bytes keyframe=\(keyframe) ts=\(micros)")
+            }
+            // Development aid: capture the exact bitstream the engine sends, so a
+            // decode failure can be reproduced outside the app.
+            if let dir = ProcessInfo.processInfo.environment["WAYSTONE_DUMP_FRAMES"],
+                self.dumped < 40
+            {
+                self.dumped += 1
+                let suffix = self.codec == .h264 ? "h264" : "h265"
+                let name = String(format: "frame-%03d-%@.%@", self.dumped, keyframe ? "k" : "p", suffix)
+                try? Data(annexB).write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+            }
             self.onFrame(EncodedFrame(data: annexB, keyframe: keyframe, timestampMicros: micros))
         }
     }
@@ -368,7 +437,7 @@ final class HEVCEncoder {
     ///
     /// The sample attachments are unreliable for HEVC, so the NAL types are the
     /// source of truth: the receiver needs an IDR to start decoding anyway.
-    private static func isKeyframe(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    private func isKeyframe(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return false }
         var length = 0
         var pointer: UnsafeMutablePointer<Int8>?
@@ -381,14 +450,12 @@ final class HEVCEncoder {
 
         let bytes = UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self)
         var offset = 0
-        while offset + 6 <= length {
+        while offset + 4 <= length {
             let size = Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16
                 | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3])
             offset += 4
             if size <= 0 || offset + size > length { break }
-            let nalType = Int((bytes[offset] >> 1) & 0x3f)
-            // IRAP types: BLA 16-18, IDR 19-20, CRA 21.
-            if (16...21).contains(nalType) {
+            if codec.isKeyframeNal(codec.nalType(bytes[offset])) {
                 return true
             }
             offset += size
@@ -399,9 +466,8 @@ final class HEVCEncoder {
     /// Converts the length-prefixed AVCC sample into Annex-B, prefixing the
     /// parameter sets on every keyframe so a late joiner can start decoding.
     private func toAnnexB(_ sampleBuffer: CMSampleBuffer, keyframe: Bool) -> [UInt8]? {
-        guard let format = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
         if parameterSets.isEmpty || keyframe {
-            parameterSets = Self.readParameterSets(format)
+            parameterSets = readParameterSets(sampleBuffer)
         }
         guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
         var length = 0
@@ -431,9 +497,18 @@ final class HEVCEncoder {
         }
         return output.isEmpty ? nil : output
     }
+    /// Extracts the access unit's parameter sets (VPS/SPS/PPS for HEVC, SPS/PPS
+    /// for H.264) from the sample's format description.
+    private func readParameterSets(_ sampleBuffer: CMSampleBuffer) -> [[UInt8]] {
+        guard let format = CMSampleBufferGetFormatDescription(sampleBuffer) else { return [] }
+        switch codec {
+        case .hevc: return Self.readHevcParameterSets(format)
+        case .h264: return Self.readH264ParameterSets(format)
+        }
+    }
 
     /// Extracts VPS, SPS and PPS from an HEVC format description.
-    private static func readParameterSets(_ format: CMFormatDescription) -> [[UInt8]] {
+    private static func readHevcParameterSets(_ format: CMFormatDescription) -> [[UInt8]] {
         var sets: [[UInt8]] = []
         var count = 0
         var nalLength: Int32 = 0
@@ -447,6 +522,30 @@ final class HEVCEncoder {
             var pointer: UnsafePointer<UInt8>?
             var size = 0
             if CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                format, parameterSetIndex: index, parameterSetPointerOut: &pointer,
+                parameterSetSizeOut: &size, parameterSetCountOut: nil,
+                nalUnitHeaderLengthOut: nil) == noErr, let pointer, size > 0 {
+                sets.append(Array(UnsafeBufferPointer(start: pointer, count: size)))
+            }
+        }
+        return sets
+    }
+
+    /// Extracts SPS and PPS from an H.264 format description.
+    private static func readH264ParameterSets(_ format: CMFormatDescription) -> [[UInt8]] {
+        var sets: [[UInt8]] = []
+        var count = 0
+        var nalLength: Int32 = 0
+        if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            format, parameterSetIndex: 0, parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil, parameterSetCountOut: &count,
+            nalUnitHeaderLengthOut: &nalLength) != noErr {
+            return sets
+        }
+        for index in 0..<count {
+            var pointer: UnsafePointer<UInt8>?
+            var size = 0
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                 format, parameterSetIndex: index, parameterSetPointerOut: &pointer,
                 parameterSetSizeOut: &size, parameterSetCountOut: nil,
                 nalUnitHeaderLengthOut: nil) == noErr, let pointer, size > 0 {
@@ -632,17 +731,21 @@ private final class Slot {
 
 /// Starts capturing the main display and encoding at `width`x`height`.
 ///
-/// Returns 0 on success, negative on failure. `callback` is invoked from the
-/// capture queues; the Rust side forwards the frames into the WebRTC engine.
+/// `codec` is `0` for HEVC and `1` for H.264, matching
+/// `waystone_rtc::VideoCodec`. Returns 0 on success, negative on failure.
+/// `callback` is invoked from the capture queues; the Rust side forwards the
+/// frames into the WebRTC engine.
 @_cdecl("ws_capture_start")
 public func ws_capture_start(
     _ width: Int32,
     _ height: Int32,
     _ fps: Int32,
     _ bitrate: Int32,
+    _ codec: Int32,
     _ callback: @escaping CaptureCallback,
     _ context: UnsafeMutableRawPointer?
 ) -> Int32 {
+    let selection: EncodeCodec = codec == 1 ? .h264 : .hevc
     let session = CaptureSession(callback: callback, context: context)
     Slot.session = session
     let ready = DispatchSemaphore(value: 0)
@@ -652,7 +755,8 @@ public func ws_capture_start(
     Slot.task = Task.detached(priority: .userInitiated) {
         do {
             try await session.start(
-                width: Int(width), height: Int(height), fps: Int(fps), bitrate: bitrate)
+                width: Int(width), height: Int(height), fps: Int(fps), bitrate: bitrate,
+                codec: selection)
             result = 0
         } catch {
             NSLog("waystone: capture failed to start: \(error)")

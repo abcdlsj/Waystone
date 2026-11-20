@@ -23,6 +23,7 @@ extern "C" {
         height: i32,
         fps: i32,
         bitrate: i32,
+        codec: i32,
         callback: CaptureCallback,
         context: *mut c_void,
     ) -> i32;
@@ -160,12 +161,26 @@ impl Capture {
         }
     }
 
-    /// Starts capturing with the given geometry.
+    /// Starts capturing with the given geometry and codec.
+    ///
+    /// `codec` is `h265`/`hevc` or `h264`/`avc`; it must match the codec the
+    /// session negotiated, because the encoder is what produces the bitstream.
     ///
     /// Blocks until the first frame can be produced, because ScreenCaptureKit
     /// answers asynchronously and the session must not answer the offer before
     /// the encoder exists.
-    pub fn start(&self, width: u32, height: u32, fps: u32, bitrate: u32) -> anyhow::Result<()> {
+    pub fn start(
+        &self,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+        codec: &str,
+    ) -> anyhow::Result<()> {
+        let tag = match waystone_rtc::VideoCodec::parse(codec) {
+            waystone_rtc::VideoCodec::Hevc => 0,
+            waystone_rtc::VideoCodec::H264 => 1,
+        };
         let context = Arc::as_ptr(&self.bridge) as *mut c_void;
         let status = unsafe {
             ws_capture_start(
@@ -173,6 +188,7 @@ impl Capture {
                 height as i32,
                 fps as i32,
                 bitrate as i32,
+                tag,
                 on_capture_event,
                 context,
             )

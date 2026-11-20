@@ -183,7 +183,7 @@ async fn capture_test(capture_spec: String, seconds: u64) -> Result<()> {
     let (width, height) = parse_size(&capture_spec)?;
     let bridge = FrameBridge::new();
     let capture = Capture::new(bridge.clone());
-    capture.start(width, height, 60, 4_000_000)?;
+    capture.start(width, height, 60, 4_000_000, "h265")?;
     info!("capturing {width}x{height} for {seconds}s");
     tokio::time::sleep(Duration::from_secs(seconds)).await;
     capture.stop();
@@ -255,6 +255,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 viewport,
                 audio,
                 peer,
+                video_codec,
                 ..
             } => {
                 info!("session {session_id} requested by {}", peer.name);
@@ -262,8 +263,16 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                     warn!("a session was already running, ignoring the new request");
                     continue;
                 }
+                // Only the controller knows what its decoder supports, so its
+                // choice wins over the local default. The encoder and the SDP
+                // offer must agree: a mismatch leaves the viewer with audio and
+                // a permanently black picture.
+                let codec = video_codec.as_deref().unwrap_or(&config.codec);
+                info!("encoding {codec}");
                 let (width, height) = (config.capture.0, config.capture.1);
-                if let Err(error) = capture.start(width, height, config.fps, config.max_bitrate) {
+                if let Err(error) =
+                    capture.start(width, height, config.fps, config.max_bitrate, codec)
+                {
                     error!("capture failed: {error}");
                     signal
                         .send(&ClientMessage::SessionBye {
@@ -281,7 +290,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 // The relay credentials are allocated by the server per session;
                 // until that is wired up the host only advertises direct paths.
                 let mut engine_config = EngineConfig::new(waystone_rtc::Role::Host, sink)
-                    .with_video_codec(waystone_rtc::VideoCodec::parse(&config.codec));
+                    .with_video_codec(waystone_rtc::VideoCodec::parse(codec));
                 if let Some(viewport) = viewport {
                     engine_config = engine_config.with_session(SessionOptions {
                         viewport,
