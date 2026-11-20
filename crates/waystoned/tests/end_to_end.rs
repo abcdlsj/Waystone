@@ -457,6 +457,7 @@ async fn full_session_delivers_media_both_ways() {
             target: host_id,
             viewport,
             audio: true,
+            video_codec: Some("h265".into()),
         })
         .await;
     let session_id = match controller

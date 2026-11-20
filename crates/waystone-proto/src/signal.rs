@@ -83,6 +83,13 @@ pub enum ClientMessage {
         target: DeviceId,
         viewport: Viewport,
         audio: bool,
+        /// Codec the controller can decode (`h265` or `h264`).
+        ///
+        /// The host encodes, so only the controller knows which codec is
+        /// usable: an iOS simulator, for instance, has no HEVC decoder. The
+        /// field is optional so older controllers keep working.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_codec: Option<String>,
     },
     /// Relay an SDP/ICE message to the peer of an existing session.
     RtcSignal {
@@ -174,6 +181,9 @@ pub enum ServerMessage {
         peer: DeviceInfo,
         viewport: Option<Viewport>,
         audio: bool,
+        /// Codec the controller asked for; echoed to both ends.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_codec: Option<String>,
     },
     /// The requested peer cannot accept a session right now.
     SessionRejected { reason: String },
@@ -267,6 +277,7 @@ mod tests {
                 fps: 120,
             },
             audio: true,
+            video_codec: Some("h264".into()),
         };
         let json = message.to_json();
         assert!(json.contains("\"type\":\"session_start\""));

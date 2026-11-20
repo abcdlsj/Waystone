@@ -121,7 +121,8 @@ impl Hub {
                 target,
                 viewport,
                 audio,
-            } => self.handle_session_start(connection_id, target, viewport, audio),
+                video_codec,
+            } => self.handle_session_start(connection_id, target, viewport, audio, video_codec),
             ClientMessage::RtcSignal { session_id, signal } => {
                 let message = ServerMessage::RtcSignal {
                     session_id: session_id.clone(),
@@ -331,6 +332,7 @@ impl Hub {
         target: DeviceId,
         viewport: waystone_proto::device::Viewport,
         audio: bool,
+        video_codec: Option<String>,
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let Some(controller) = self.peer_by_connection(&inner, connection_id).cloned() else {
@@ -393,6 +395,7 @@ impl Hub {
             peer: host.info.clone(),
             viewport: Some(viewport),
             audio,
+            video_codec: video_codec.clone(),
         });
         let _ = host.outbox.send(ServerMessage::SessionAccepted {
             session_id,
@@ -400,6 +403,7 @@ impl Hub {
             peer: controller.info.clone(),
             viewport: Some(viewport),
             audio,
+            video_codec,
         });
         Ok(())
     }

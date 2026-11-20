@@ -351,6 +351,7 @@ async fn pairing_auth_and_session_flow() {
                     fps: 60,
                 },
                 audio: true,
+                video_codec: Some("h265".into()),
             }
             .to_json()
             .into(),
