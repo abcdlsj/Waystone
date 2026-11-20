@@ -6,7 +6,7 @@
 
 ## 1. 一句话状态
 
-端到端骨架已跑通到「设备配对 → 信令 → WebRTC 协商 → 媒体包双向传输」，**唯一没闭环的是 iOS 侧上屏**（收到首帧后画面仍黑，原因已定位，见第 5 节）。Windows 被控端尚未开始。
+端到端全链路已跑通：设备配对 → 信令 → WebRTC 协商 → 媒体双向传输 → **iOS 上屏**（在 iOS 模拟器上实测出画面）。Windows 被控端尚未开始。
 
 ## 2. 仓库结构
 
@@ -35,6 +35,7 @@ docs/design.md           原始设计文档（中文，产品口径）
 
 - `engine.rs`：**单所有者驱动**。str0m 要求「每次 mutation 后必须 poll 到 Timeout」，所以 `Rtc` 只被一个 task 持有，外部只发命令、只收回调，不可能破坏该不变量
   - 候选收集：host（全部物理网卡，跳过隧道）/ srflx（自写 STUN）/ relay（TURN）
+  - 候选集与现实对齐：只通告与 socket 同族的地址（绑 `0.0.0.0` 就不会出现 IPv6 候选），并剔除以本机为源发不出去的地址（例如 macOS 上某 VM 网桥把自己子网的网络地址当成接口地址，发往它会 `EADDRNOTAVAIL`）
   - `net.rs`：从 `recvmsg` 辅助数据读目的地址——通配 socket 必须回填目的地址，否则 ICE 会把所有连通性检查当作非法丢弃（这是之前黑屏的主因之一）
   - 中继回退时自动把视频码率钳到 `relay_bitrate_ceiling`
   - `Event::FrameDropped`：会话未就绪时丢帧会通知宿主重试关键帧
@@ -64,8 +65,8 @@ docs/design.md           原始设计文档（中文，产品口径）
 
 - `swift/Capture.swift`（build.rs 调 swiftc 编成静态库）：
   - ScreenCaptureKit 采集（NV12，IO 表面直通）
-  - VideoToolbox HEVC/H.264：`RealTime`、禁 B 帧、`MaxKeyFrameInterval=0`、无 look-ahead
-  - AVCC → Annex-B 转换，每个关键帧前置 VPS/SPS/PPS
+  - VideoToolbox 编码：**HEVC 与 H.264 都支持**（codec 由控制端在会话开始时指定），`RealTime`、禁 B 帧、`MaxKeyFrameInterval=0`、无 look-ahead
+  - AVCC → Annex-B 转换，每个关键帧前置参数集（HEVC 的 VPS/SPS/PPS 或 H.264 的 SPS/PPS）
   - AudioToolbox Opus（48kHz 立体声，20ms 帧长）；设备自带的 Opus 编码器，无外部依赖
   - **缓存最后一帧并在需要时重编码**：ScreenCaptureKit 只在画面变化时出帧，静态桌面下新接入的观众会永远等不到画面，这是必须的补偿
   - CoreGraphics 输入注入，含 `ReleaseAll` 兜底（断连不会留下卡住的 Ctrl）
@@ -73,15 +74,21 @@ docs/design.md           原始设计文档（中文，产品口径）
 - `src/signal.rs`：指纹固定（不走 CA 链）的 WSS 客户端
 - `src/config.rs`：设备密钥、配置持久化（0600）
 - CLI：`pair <uri>` / `run` / `status` / `capture-test`（`capture-test` 用于在配对前验证录屏权限）
+- 排障开关：`WAYSTONE_DUMP_FRAMES=<dir>` 把编码后的前 40 帧（`.h264`/`.h265`）落盘，可在 App 之外复现解码问题
 
-### 3.5 `client-ios`（9 个单测）
+### 3.5 `client-ios`（11 个单测）
 
 - 首页（设备池 + 扫码 + 粘贴兜底）、串流页（Metal 层 + 手势 + 悬浮球 + 三套胶囊 + 状态胶囊）
 - `GestureEngine`：设计文档里「点按 / 滑移悬停 / 停顿拖拽 / 双指右键」状态机，9 个单测覆盖每个分支（尤其「悬停后抬手绝不点击」这条防误出牌的规则）
-- `VideoDecoder`：Annex-B → AVCC + `CMFormatDescription`，解码直出 Metal
+- `VideoDecoder`：Annex-B → AVCC + `CMFormatDescription`（按 codec 选 HEVC / H.264 的构造器），解码直出 Metal
+- `VideoDecoder` 的解码调用不能再传 per-frame `outputHandler`：会话创建时已经注册了 output callback，两者同时给会让 VideoToolbox 对每一帧返回 `kVTParameterErr`(-12902)，表现就是「收到关键帧但画面永远黑」
 - `AudioPlayer`：`AVAudioEngine` + 自建 20ms 环形缓冲
 - `SignalingClient`：`URLSessionWebSocketTask` + 证书指纹固定
-- codec 自适应：`VTIsHardwareDecodeSupported(HEVC)` 决定协商 HEVC 还是 H.264（模拟器无 HEVC 解码器）
+- codec 自适应：`VTIsHardwareDecodeSupported(HEVC)` 决定协商 HEVC 还是 H.264（模拟器无 HEVC 解码器），并通过 `session_start.video_codec` 告诉被控端该编哪种码
+
+### 3.6 视频 codec 的一次会话内协商
+
+被控端负责编码，但它无法知道自己对面能解什么码，所以控制端在 `session_start` 里带上 `video_codec`（`h265` / `h264`），服务端原样回显在双方的 `session_accepted` 里。被控端据此同时决定 SDP 和 VideoToolbox 的编码格式，两者必须一致，否则就是「有声音、画面永远黑」。字段可缺省，缺省时被控端退回本地配置的 `codec`。
 
 ## 4. 验证方式（接手者请照做）
 
@@ -108,27 +115,28 @@ cargo run -p waystone-host -- --state-dir /tmp/wsstate run
 cargo run -p waystone-host -- --state-dir /tmp/wsstate capture-test --seconds 3
 
 # iOS（xcodegen + 预先构建 Rust 静态库）
-cd client-ios && ./scripts/build-rust.sh release
+cd client-ios && ./scripts/build-rust.sh debug
 xcodegen generate
 xcodebuild -project Waystone.xcodeproj -scheme Waystone \
   -sdk iphonesimulator -destination 'platform=iOS Simulator,name=<设备名>' build
+xcodebuild test -project Waystone.xcodeproj -scheme Waystone \
+  -sdk iphonesimulator -destination 'platform=iOS Simulator,name=<设备名>'
 # 模拟器无法扫码，用环境变量注入配对 URI（仅 DEBUG 生效）
 SIMCTL_CHILD_WAYSTONE_PAIR_URI="waystone://pair?..." \
 SIMCTL_CHILD_WAYSTONE_AUTO_CONNECT=1 xcrun simctl launch <设备> dev.waystone.app
 ```
 
+排障要点：`cargo run -p waystone-host -- run` 是长期进程，会话结束后仍在；换服务端实例（指纹变化）必须重装模拟器 App（`simctl uninstall`），否则 App 里存的实例会因指纹不匹配连不上。
+
 ## 5. 已知问题（按优先级）
 
-### P0 — iOS 收到首帧后画面仍黑
+### 已修复：iOS 收到首帧后画面仍黑
 
-**现象**：主机 `media ready` → 请求关键帧 → 帧已发出；iOS `media negotiated` → `transport connected` → 收到音频包 / 首帧 → 之后无后续帧 → 50s 后 DTLS 超时。
+当时的现象是「主机侧 `media ready`、帧已发出，iOS 侧 `transport connected`、收到音频包/首帧，随后再无画面，几十秒后会话超时」。实测定位到三个独立原因，均已修复并在模拟器上看到画面：
 
-**已定位的两个独立原因**：
-
-1. **主机端 PT 匹配时机**：`engine.rs:876 payload_type()` 走 `writer.payload_params()`，host 侧刚 `accept_offer` 后 remote PT 列表可能尚未就绪，导致 `H264 is not negotiated for Mid(...)` 而丢帧。修法：把 PT 在 `MediaReady` 时缓存，或改用 `rtc.media(mid).remote_pts()` 直查。
-2. **候选集收敛**：主机同时通告了 `10.23.x`、`192.168.x`、`127.0.0.1` 等多个 host 候选，模拟器与宿主共享网络命名空间，ICE 有时选中 `127.0.0.1` 之外的地址后单向可达。修法：给 `EngineConfig` 加候选白名单 / 优先级，或让主机按 `--endpoint` 的网段只通告相关候选。
-
-> 这两条都不需要改架构，属于局部修补。建议改完后用 `WAYSTONE_TRACE_NET=1` 复跑观察 `rx/tx`。
+1. **codec 无人对接**：主机只按本地 `config.codec`（默认 `h265`）配编码器和 SDP，而模拟器只有 H.264 解码器，于是主机侧报 `Hevc is not negotiated for Mid(...)` 丢光所有帧。现在由控制端在 `session_start.video_codec` 里指定，主机同时切换编码器与 SDP（见 3.6）。
+2. **解码调用参数非法**：iOS 侧 `VTDecompressionSession` 创建时已注册 output callback，却还在 `VTDecompressionSessionDecodeFrame` 传 per-frame `outputHandler`，VideoToolbox 对每帧返回 `kVTParameterErr`(-12902)。改为 `frameRefcon: nil` 后正常出帧，并加了真实码流的回归测试（`client-ios/WaystoneTests/VideoDecoderTests.swift`）。此 bug 与 codec 无关，HEVC 同样中招。
+3. **候选集不收敛**：绑 `0.0.0.0` 时还在通告 IPv6 候选（该 socket 发不出去 IPv6），以及本机作为源发不出去的地址（某 VM 网桥把子网网络地址当接口地址，发往它 `EADDRNOTAVAIL`）。现在按 socket 地址族过滤，并用零长报文探测可用性。
 
 ### P1 — 未实现（设计文档要求，MVP 范围内）
 
@@ -159,6 +167,6 @@ SIMCTL_CHILD_WAYSTONE_AUTO_CONNECT=1 xcrun simctl launch <设备> dev.waystone.a
 
 ## 7. 接手建议
 
-1. 先跑 `cargo test --workspace` 和 `crates/waystoned/tests/end_to_end.rs`，理解全链路
-2. 修 P0 两条，用模拟器验证到「画面出现」
+1. 先跑 `cargo test --workspace`、`crates/waystoned/tests/end_to_end.rs` 和 `client-ios` 的 `xcodebuild test`，理解全链路
+2. 用模拟器或真机跑一遍第 4 节的流程，确认「画面出现」这条基线
 3. Windows 被控端按 `host/macos` 的分层复制：`signal`（信令）/ `capture`（媒体）/ `input`（注入）三层，协议层完全复用 `waystone-proto` 与 `waystone-rtc`
