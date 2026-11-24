@@ -31,6 +31,7 @@
 		57D85BF27CF61FE28819137E /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8510C078706589B0045E4824 /* CoreVideo.framework */; };
 		6120FEE06D681B3F91A7FC14 /* VideoDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6932C79015F68C0F8A0B56D3 /* VideoDecoderTests.swift */; };
 		66A52B809954A454D686A7D4 /* StreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E45E2AA276B2DBA758BC86E /* StreamView.swift */; };
+		6FB6B9E1E524B7B0EE1E0B22 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4488D429C1EED16B61F5A81E /* Assets.xcassets */; };
 		78FC99A56D437F2FC9FBB1F3 /* WaystoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D69B10C47EAB3C62FD12BE8 /* WaystoneApp.swift */; };
 		796FD7D33889BE0CC0A7045D /* TrackpadEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AC361AB577CE9A7F7E71980 /* TrackpadEngine.swift */; };
 		7C2BC1AAF294AC7824139D0E /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5BDCB3E95F40559531F8238 /* AudioPlayer.swift */; };
@@ -100,6 +101,7 @@
 		3AC361AB577CE9A7F7E71980 /* TrackpadEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackpadEngine.swift; sourceTree = "<group>"; };
 		3E02E0883D140621A66983AB /* VideoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
 		3FE8259764A599AF19089B51 /* Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Bridging-Header.h"; sourceTree = "<group>"; };
+		4488D429C1EED16B61F5A81E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4E028B56CD56E2CBD8C03FE5 /* PictureGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureGeometryTests.swift; sourceTree = "<group>"; };
 		4E45E2AA276B2DBA758BC86E /* StreamView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamView.swift; sourceTree = "<group>"; };
 		51EC37FF9E52251C21DF6B40 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
@@ -197,6 +199,7 @@
 				36BC002F272B54B41EE2F588 /* Protocol */,
 				F661D047038B0CDB2C153F3B /* Stream */,
 				9610BE6B6BCCEB24B22177E8 /* UI */,
+				4488D429C1EED16B61F5A81E /* Assets.xcassets */,
 				F8AD70C2C98197E8932A4B6D /* Info.plist */,
 			);
 			path = Waystone;
@@ -390,6 +393,7 @@
 			buildConfigurationList = C9B8B8505160AAE1C59E191B /* Build configuration list for PBXNativeTarget "Waystone" */;
 			buildPhases = (
 				83B2B2F3B096D6C1A84340B9 /* Sources */,
+				7E1C379A25C39AB0F18A53FC /* Resources */,
 				B88D3E48F0AB418BE1808E76 /* Frameworks */,
 			);
 			buildRules = (
@@ -472,6 +476,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				8F9F6CF5C5A4C30C08CA0B62 /* h264-keyframe.h264 in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7E1C379A25C39AB0F18A53FC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6FB6B9E1E524B7B0EE1E0B22 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

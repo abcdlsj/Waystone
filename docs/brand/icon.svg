@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Waystone app icon: a standing boundary stone with a play mark cut out of it. -->
+  <rect width="1024" height="1024" fill="#16202B"/>
+  <path fill="#E9E3D7" fill-rule="evenodd"
+        d="M 330 840 L 366 352 C 380 190 644 190 658 352 L 694 840 Z
+           M 462 488 L 462 652 L 598 570 Z"/>
+</svg>
