@@ -57,7 +57,9 @@ docs/design.md           原始设计文档（中文，产品口径）
 | `challenge.rs` | 每连接 nonce（60s TTL、用后即焚）+ Ed25519 验签 |
 | `hub.rs` | 设备注册表、会话路由、双向 teardown 通知；同一设备重连踢掉旧连接 |
 | `turnserver.rs` | 内嵌 TURN，coturn `use-auth-secret` 兼容凭据（服务端不存每客户端密码） |
-| `http.rs` | 面板、`/api/{status,pair,devices,claim}`、WSS 升级（Origin 门禁） |
+| `auth.rs` | 首次访问设置管理员口令（一次性 claim）、Argon2id、服务端会话 + `HttpOnly; Secure; SameSite=Strict` cookie |
+| `http.rs` | 面板、`/api/{status,pair,devices}`（需登录）、同源校验、WSS 升级（认证超时、ping/RTT、64 KiB 上限） |
+| `lan.rs` | 未指定 `--endpoint` 时自动选主 LAN IPv4 |
 
 `tests/end_to_end.rs` 是本仓库最有价值的测试：真实 HTTPS/WSS 服务端 + 真实两端引擎，跑完 配对→认证→SessionStart→SDP/ICE 交换→HEVC 帧→输入帧→挂断 全链路。
 
@@ -108,9 +110,9 @@ cargo clippy --workspace --all-targets
 cargo run -p waystoned -- --data-dir /tmp/wsdata --listen 0.0.0.0:8443 \
   --endpoint <本机IP>:8443 --no-turn
 
-# 生成配对二维码 / 文本
-curl -sk -X POST "https://127.0.0.1:8443/api/pair?role=host"
-curl -sk -X POST "https://127.0.0.1:8443/api/pair?role=controller"
+# 生成配对 URI（直接读数据目录，无需管理员口令；服务端需至少启动过一次）
+cargo run -p waystoned -- pair --role host --data-dir /tmp/wsdata
+cargo run -p waystoned -- pair --role controller --data-dir /tmp/wsdata
 
 # 被控端配对并运行
 cargo run -p waystone-host -- --state-dir /tmp/wsstate pair "<waystone://pair?...>"
@@ -159,7 +161,7 @@ SIMCTL_CHILD_WAYSTONE_AUTO_CONNECT=1 xcrun simctl launch <设备> dev.waystone.a
 
 ### P2 — 工程化缺口
 
-- `waystoned` 无 Docker 镜像 / systemd 单元
+- `waystoned` 已有 Dockerfile（`crates/waystoned/Dockerfile`），无 systemd 单元
 - macOS 被控端只有 CLI，无 `.app` 打包、无 LaunchAgent
 - 无 CI（当前靠本地 `cargo test` / `xcodebuild`）
 - 无日志落盘与轮转（只有 stderr）
