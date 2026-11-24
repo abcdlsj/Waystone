@@ -36,6 +36,12 @@ final class StreamAcceptanceTests: XCTestCase {
         let live = waitUntil(30) { !connecting.exists }
         if !live { print(app.debugDescription) }
         XCTAssertTrue(live, "no picture within 30 s")
+        // Preferences persist, so an aborted earlier run may have left another
+        // mode or preset behind.
+        openPanel()
+        app.buttons["直点"].tap()
+        app.buttons["卡牌"].tap()
+        closePanel()
         sleep(2)
         shoot("02-stream-cards")
 
@@ -55,7 +61,10 @@ final class StreamAcceptanceTests: XCTestCase {
         shoot("03-panel")
         app.buttons["视觉小说"].tap()
         closePanel()
-        point(0.02, 0.5).tap()  // leading edge zone sends Enter
+        // Trailing edge zone sends Enter; the floating ball sits on it at mid
+        // height. The simulator delivers no touches in the leading ~40 pt in
+        // landscape, so the leading zone is not exercised here.
+        point(0.97, 0.2).tap()
         app.buttons["快进"].tap()  // latches Ctrl
         sleep(1)
         shoot("04-novel")

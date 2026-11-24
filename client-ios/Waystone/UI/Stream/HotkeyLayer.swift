@@ -155,14 +155,27 @@ private struct EdgeZoneView: View {
         Rectangle()
             .fill(Color.white.opacity(flash ? 0.12 : 0.015))
             .frame(width: zone.width)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: zone.side == .leading ? .leading : .trailing)
-            .onTapGesture {
-                input.perform(zone.action, down: true)
-                input.perform(zone.action, down: false)
-                flash = true
-                withAnimation(.easeOut(duration: 0.25)) { flash = false }
-            }
+            .contentShape(Rectangle())
+            // Same touch handling as the capsules: fire on touch-down, which a
+            // SwiftUI tap on a near-transparent strip does not reliably do.
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !flash else { return }
+                        flash = true
+                        input.perform(zone.action, down: true)
+                    }
+                    .onEnded { _ in
+                        input.perform(zone.action, down: false)
+                        withAnimation(.easeOut(duration: 0.25)) { flash = false }
+                    }
+            )
+            .accessibilityElement()
             .accessibilityLabel("下一句")
+            .accessibilityAddTraits(.isButton)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: zone.side == .leading ? .leading : .trailing)
+            // A thumb finds the physical edge, not the safe area's.
+            .ignoresSafeArea()
     }
 }
 

@@ -30,6 +30,10 @@ final class TouchSurfaceView: UIView {
         super.init(frame: .zero)
         backgroundColor = .black
         isMultipleTouchEnabled = true
+        // Touches must land on this view itself: `touchesMoved` matches them
+        // with `touch.view === self`, and a hit on the picture would make the
+        // picture the touch's view and drop every move.
+        videoView.isUserInteractionEnabled = false
         addSubview(videoView)
     }
 
