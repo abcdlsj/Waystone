@@ -76,7 +76,7 @@ final class SignalingClient {
                             self.onEvent?(.message(try Wire.ServerMessage.decode(text)))
                         } catch {
                             // An unknown message from a newer server is not fatal.
-                            Log.signal.info("ignoring message: \(error.localizedDescription)")
+                            Log.signal.info("ignoring message: \(error.localizedDescription, privacy: .public)")
                         }
                     }
                     self.receive()

@@ -36,7 +36,7 @@ final class AudioPlayer {
             try session.setPreferredIOBufferDuration(0.01)
             try session.setActive(true)
         } catch {
-            Log.media.error("audio session: \(error.localizedDescription)")
+            Log.media.error("audio session: \(error.localizedDescription, privacy: .public)")
         }
 
         let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2)!
@@ -56,7 +56,7 @@ final class AudioPlayer {
             try engine.start()
             started = true
         } catch {
-            Log.media.error("audio engine: \(error.localizedDescription)")
+            Log.media.error("audio engine: \(error.localizedDescription, privacy: .public)")
         }
     }
 

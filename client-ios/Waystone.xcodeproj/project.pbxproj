@@ -14,6 +14,7 @@
 		152431C72B4E4847A1692CD7 /* MediaPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A345A03C9EABFF863839611D /* MediaPipeline.swift */; };
 		16DDE2FB594A3EDF853EE592 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 32E402DEC00ED797D6FA192F /* VideoToolbox.framework */; };
 		17338250B0B885515C6D828C /* Haptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DDAA958F1396D323E200E5B /* Haptics.swift */; };
+		17BCBB8E3019F1AA8B3D2B2B /* StreamAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A66A69A102D0577A0C7B0B5 /* StreamAcceptanceTests.swift */; };
 		1C8974CB687579CCFA0E5B78 /* StreamSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = D107803C2FF6C9E1EEB797FA /* StreamSurface.swift */; };
 		214CE0CEFBD6365DC1C15D2D /* HotkeyLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7950869B76B7DD6DB484E261 /* HotkeyLayer.swift */; };
 		29394394EA4E64AEA53C8617 /* WaystoneRTC.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0BF6CD7E43F4EE87770D7FC3 /* WaystoneRTC.xcframework */; };
@@ -62,6 +63,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		541DAAFF019EC675C6AA775A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 4B2A93D610C665A1D760E26E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9512AB9D4F3AE993EB3AC8BF;
+			remoteInfo = Waystone;
+		};
 		57E10DACF4A0EEB97C5B0B01 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 4B2A93D610C665A1D760E26E /* Project object */;
@@ -79,6 +87,7 @@
 		0BF6CD7E43F4EE87770D7FC3 /* WaystoneRTC.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = WaystoneRTC.xcframework; path = Vendor/WaystoneRTC.xcframework; sourceTree = "<group>"; };
 		105F63AB862A0B200C7FD861 /* Transport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transport.swift; sourceTree = "<group>"; };
 		16E070A0BB46FB149F22477D /* PoolConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoolConnection.swift; sourceTree = "<group>"; };
+		1A66A69A102D0577A0C7B0B5 /* StreamAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamAcceptanceTests.swift; sourceTree = "<group>"; };
 		1C56B8FF99A8DAF1853BD521 /* FloatingBall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingBall.swift; sourceTree = "<group>"; };
 		1D6E942ABA123D269E42D850 /* DevHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevHooks.swift; sourceTree = "<group>"; };
 		2483AF36FD46912DEC4EC8CF /* PairingLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingLink.swift; sourceTree = "<group>"; };
@@ -109,6 +118,7 @@
 		961FC20ED255BC9F320227EC /* Instance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instance.swift; sourceTree = "<group>"; };
 		99C037B3207B7DEB64D65382 /* WaystoneTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WaystoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A90F771EF464DDA5DFA1CD9 /* TouchEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchEngine.swift; sourceTree = "<group>"; };
+		9B0BC6985E242ACB5B03A22E /* WaystoneAcceptance.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WaystoneAcceptance.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9E46CA59471BFCC182B6E585 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
 		A3229F2C658B7F075492AE91 /* SoftKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftKeyboard.swift; sourceTree = "<group>"; };
 		A345A03C9EABFF863839611D /* MediaPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPipeline.swift; sourceTree = "<group>"; };
@@ -196,6 +206,7 @@
 			isa = PBXGroup;
 			children = (
 				192F0C021067E498644CC823 /* Waystone */,
+				D7C43166455E5973565185F4 /* WaystoneAcceptance */,
 				5751DEF7AD520C3F13411CEC /* WaystoneTests */,
 				D572F96CDDCBF7C8510C7489 /* Frameworks */,
 				E0E1BACD65EB745901D73E45 /* Products */,
@@ -313,10 +324,19 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		D7C43166455E5973565185F4 /* WaystoneAcceptance */ = {
+			isa = PBXGroup;
+			children = (
+				1A66A69A102D0577A0C7B0B5 /* StreamAcceptanceTests.swift */,
+			);
+			path = WaystoneAcceptance;
+			sourceTree = "<group>";
+		};
 		E0E1BACD65EB745901D73E45 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				0079A854CBD34627A1489F33 /* Waystone.app */,
+				9B0BC6985E242ACB5B03A22E /* WaystoneAcceptance.xctest */,
 				99C037B3207B7DEB64D65382 /* WaystoneTests.xctest */,
 			);
 			name = Products;
@@ -383,6 +403,24 @@
 			productReference = 0079A854CBD34627A1489F33 /* Waystone.app */;
 			productType = "com.apple.product-type.application";
 		};
+		C3B1D0AE407ED7E1A7A3A789 /* WaystoneAcceptance */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6BDAB8A6B0AC24A10BF4EDCD /* Build configuration list for PBXNativeTarget "WaystoneAcceptance" */;
+			buildPhases = (
+				104A9CD113532460BD34A564 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C17D8C6BDD2BAFE41273E79B /* PBXTargetDependency */,
+			);
+			name = WaystoneAcceptance;
+			packageProductDependencies = (
+			);
+			productName = WaystoneAcceptance;
+			productReference = 9B0BC6985E242ACB5B03A22E /* WaystoneAcceptance.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -399,6 +437,11 @@
 					9512AB9D4F3AE993EB3AC8BF = {
 						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
+					};
+					C3B1D0AE407ED7E1A7A3A789 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+						TestTargetID = 9512AB9D4F3AE993EB3AC8BF;
 					};
 				};
 			};
@@ -418,6 +461,7 @@
 			targets = (
 				9512AB9D4F3AE993EB3AC8BF /* Waystone */,
 				3566639F814E868A83433410 /* WaystoneTests */,
+				C3B1D0AE407ED7E1A7A3A789 /* WaystoneAcceptance */,
 			);
 		};
 /* End PBXProject section */
@@ -434,6 +478,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		104A9CD113532460BD34A564 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				17BCBB8E3019F1AA8B3D2B2B /* StreamAcceptanceTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		83B2B2F3B096D6C1A84340B9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -497,9 +549,50 @@
 			target = 9512AB9D4F3AE993EB3AC8BF /* Waystone */;
 			targetProxy = 57E10DACF4A0EEB97C5B0B01 /* PBXContainerItemProxy */;
 		};
+		C17D8C6BDD2BAFE41273E79B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9512AB9D4F3AE993EB3AC8BF /* Waystone */;
+			targetProxy = 541DAAFF019EC675C6AA775A /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		055644FBFE03FFE2EC7D575A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.waystone.app.acceptance;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Waystone;
+			};
+			name = Release;
+		};
+		1DE2EFA548BDD559413EAB1B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.waystone.app.acceptance;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Waystone;
+			};
+			name = Debug;
+		};
 		342B6287016209C24BC112C0 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -732,6 +825,15 @@
 			buildConfigurations = (
 				342B6287016209C24BC112C0 /* Debug */,
 				7541C59AE2050B64C0DF6FCC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6BDAB8A6B0AC24A10BF4EDCD /* Build configuration list for PBXNativeTarget "WaystoneAcceptance" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1DE2EFA548BDD559413EAB1B /* Debug */,
+				055644FBFE03FFE2EC7D575A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

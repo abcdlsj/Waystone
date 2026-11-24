@@ -30,6 +30,7 @@ private struct StreamContent: View {
 
             StreamSurface(session: session, geometry: input.geometry)
                 .ignoresSafeArea()
+                .accessibilityIdentifier("stream-surface")
 
             if input.mode == .trackpad {
                 LocalCursor(position: input.geometry.surfacePoint(x: input.cursor.x, y: input.cursor.y))
@@ -138,5 +139,6 @@ private struct ConnectingOverlay: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
+        .accessibilityIdentifier("connecting")
     }
 }

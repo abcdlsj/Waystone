@@ -36,7 +36,7 @@ final class AppModel: ObservableObject {
             identity = try DeviceIdentity(loadOrCreateFor: "primary")
         } catch {
             identity = nil
-            Log.app.error("cannot load the device identity: \(error.localizedDescription)")
+            Log.app.error("cannot load the device identity: \(error.localizedDescription, privacy: .public)")
         }
         if let identity {
             pools = store.instances.map { PoolConnection(instance: $0, identity: identity) }

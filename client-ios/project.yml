@@ -58,6 +58,20 @@ targets:
     dependencies:
       - target: Waystone
 
+  WaystoneAcceptance:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: WaystoneAcceptance
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.waystone.app.acceptance
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Waystone
+    dependencies:
+      - target: Waystone
+
 schemes:
   Waystone:
     build:
@@ -70,3 +84,12 @@ schemes:
       config: Debug
       targets:
         - WaystoneTests
+  WaystoneAcceptance:
+    build:
+      targets:
+        Waystone: all
+        WaystoneAcceptance: [test]
+    test:
+      config: Debug
+      targets:
+        - WaystoneAcceptance

@@ -174,7 +174,7 @@ final class PoolConnection: ObservableObject, Identifiable, SessionSignaling {
         case .message(let message):
             handle(message)
         case .closed(let reason):
-            Log.signal.info("connection to \(self.instance.endpoint) closed: \(reason)")
+            Log.signal.info("connection to \(self.instance.endpoint, privacy: .public) closed: \(reason, privacy: .public)")
             client = nil
             session?.signalingLost()
             if pairingToken != nil {
@@ -257,7 +257,7 @@ final class PoolConnection: ObservableObject, Identifiable, SessionSignaling {
             break
 
         case .error(let message):
-            Log.signal.error("server error: \(message)")
+            Log.signal.error("server error: \(message, privacy: .public)")
         }
     }
 

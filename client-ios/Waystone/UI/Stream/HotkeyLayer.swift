@@ -116,7 +116,9 @@ private struct HotkeyCapsule: View {
                 }
         )
         .animation(.easeOut(duration: 0.08), value: pressed)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(button.title)
+        .accessibilityValue(latched ? "已按住" : "")
         .accessibilityAddTraits(.isButton)
     }
 }

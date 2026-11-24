@@ -61,6 +61,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
     private var lastKeyframeRequest = Date.distantPast
     #if DEBUG
     private var lastStats: (received: Int, decoded: Int, skipped: Int) = (0, 0, 0)
+    private var statsTicks = 0
     #endif
 
     init(host: Host, pool: PoolConnection, preferences: StreamPreferences) {
@@ -294,7 +295,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
 
     private func end(_ ending: Ending) {
         guard !isEnded else { return }
-        Log.session.info("session ended: \(ending.title) \(ending.message ?? "")")
+        Log.session.info("session ended: \(ending.title, privacy: .public) \(ending.message ?? "", privacy: .public)")
         healthTimer?.invalidate()
         healthTimer = nil
         transport?.stop()
@@ -304,14 +305,16 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
         stage = .ended(ending)
     }
 
+    /// Development builds log throughput every 2 s, which tells "the network
+    /// is slow" from "the decoder is behind" without a debugger.
     private func logStats() {
         #if DEBUG
+        statsTicks += 1
+        guard statsTicks % 4 == 0 else { return }
         let stats = pipeline.stats
         let current = (stats.received, stats.decoder.decoded, stats.decoder.skipped)
-        if current.0 != lastStats.received {
-            Log.media.debug(
-                "rx +\(current.0 - self.lastStats.received) decoded +\(current.1 - self.lastStats.decoded) skipped +\(current.2 - self.lastStats.skipped) per 0.5s")
-        }
+        Log.media.info(
+            "per 2s: received \(current.0 - self.lastStats.received, privacy: .public), decoded \(current.1 - self.lastStats.decoded, privacy: .public), skipped \(current.2 - self.lastStats.skipped, privacy: .public)")
         lastStats = current
         #endif
     }

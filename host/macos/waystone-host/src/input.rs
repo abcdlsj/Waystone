@@ -290,7 +290,10 @@ fn run(display: Display, commands: mpsc::Receiver<Command>) {
     for command in commands {
         let actions = match command {
             Command::Frame(frame) => match InputEvent::decode(&frame) {
-                Ok(event) => state.handle(event, Instant::now()),
+                Ok(event) => {
+                    debug!("input {event:?}");
+                    state.handle(event, Instant::now())
+                }
                 Err(error) => {
                     warn!("dropping input frame: {error}");
                     continue;

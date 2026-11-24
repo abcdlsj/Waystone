@@ -147,7 +147,7 @@ final class VideoDecoder {
             session, sampleBuffer: sample, flags: [._EnableAsynchronousDecompression],
             frameRefcon: nil, infoFlagsOut: nil)
         if status != noErr {
-            Log.media.error("decode failed: \(status)")
+            Log.media.error("decode failed: \(status, privacy: .public)")
             finished(decoded: false)
             waitingForKeyframe = true
             onKeyframeNeeded?()
@@ -181,7 +181,7 @@ final class VideoDecoder {
             imageBufferAttributes: attributes as CFDictionary, outputCallback: &callback,
             decompressionSessionOut: &created)
         guard status == noErr, let created else {
-            Log.media.error("cannot create decoder: \(status)")
+            Log.media.error("cannot create decoder: \(status, privacy: .public)")
             return false
         }
         VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
@@ -218,7 +218,7 @@ final class VideoDecoder {
                     parameterSetSizes: sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &format)
             }
         }
-        if status != noErr { Log.media.error("bad parameter sets: \(status)") }
+        if status != noErr { Log.media.error("bad parameter sets: \(status, privacy: .public)") }
         return status == noErr ? format : nil
     }
 
