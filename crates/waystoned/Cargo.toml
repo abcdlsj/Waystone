@@ -29,7 +29,9 @@ qrcode = "0.14"
 rand = { workspace = true }
 rcgen = "0.14"
 rusqlite = { version = "0.37", features = ["bundled"] }
-rustls = { workspace = true }
+# `ring` is the provider installed in `tls.rs`; without the feature a
+# single-crate build has no provider at all.
+rustls = { workspace = true, features = ["ring"] }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

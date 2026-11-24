@@ -158,9 +158,11 @@ final class SessionController: ObservableObject {
             let token = Instance.token(from: uri),
             let identity
         else {
+            NSLog("waystone: pairing URI rejected: \(uri)")
             lastError = "That pairing code is not valid."
             return
         }
+        NSLog("waystone: pairing with \(instance.endpoint)")
         instance.pendingToken = token
         instance.label = instance.endpoint
         phase = .pairing

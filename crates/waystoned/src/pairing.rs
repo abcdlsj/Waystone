@@ -18,13 +18,30 @@ pub fn create(
     fingerprint: &str,
     role: Role,
 ) -> Result<PairingUri> {
-    let token = store.create_pairing_token(role, PAIRING_TOKEN_TTL)?;
+    let token = store.create_pairing_token(role, token_ttl())?;
     Ok(PairingUri {
         endpoint: endpoint.to_string(),
         turn: turn.to_string(),
         fingerprint: fingerprint.to_string(),
         token: token.token,
     })
+}
+
+/// How long a freshly issued pairing token stays usable.
+///
+/// The default is short on purpose: the URI is displayed on screen and anybody
+/// who photographs it can enroll. `WAYSTONE_PAIR_TTL` exists for development
+/// (baking a URI into a device build, where build and install take longer than
+/// the token lives).
+fn token_ttl() -> std::time::Duration {
+    match std::env::var("WAYSTONE_PAIR_TTL") {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(PAIRING_TOKEN_TTL),
+        Err(_) => PAIRING_TOKEN_TTL,
+    }
 }
 
 /// Renders a pairing URI as a QR code, ready to be embedded in the panel.
