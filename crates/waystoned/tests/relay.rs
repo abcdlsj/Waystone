@@ -143,11 +143,22 @@ async fn wait_for(
     what: &str,
     predicate: impl Fn(&Event) -> bool,
 ) -> Event {
+    wait_keeping(events, what, predicate, &mut Vec::new()).await
+}
+
+/// Like `wait_for`, but keeps the events it passes over. Candidates gathered
+/// before the offer/answer exchange finishes must still reach the peer.
+async fn wait_keeping(
+    events: &mut UnboundedReceiver<Event>,
+    what: &str,
+    predicate: impl Fn(&Event) -> bool,
+    skipped: &mut Vec<Event>,
+) -> Event {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(event)) if predicate(&event) => return event,
-            Ok(Some(_)) => continue,
+            Ok(Some(event)) => skipped.push(event),
             Ok(None) => panic!("event channel closed while waiting for {what}"),
             Err(_) => panic!("timed out waiting for {what}"),
         }
@@ -164,17 +175,25 @@ async fn media_and_input_flow_through_the_relay() {
     let controller = start_engine(Role::Controller, turn_config(&turn, None), controller_tx).await;
 
     // The controller offers on its own; relay offer and answer verbatim.
-    let Event::LocalOffer(offer) = wait_for(&mut controller_events, "offer", |event| {
-        matches!(event, Event::LocalOffer(_))
-    })
+    let mut early_host = Vec::new();
+    let mut early_controller = Vec::new();
+    let Event::LocalOffer(offer) = wait_keeping(
+        &mut controller_events,
+        "offer",
+        |event| matches!(event, Event::LocalOffer(_)),
+        &mut early_controller,
+    )
     .await
     else {
         unreachable!()
     };
     host.accept_offer(offer);
-    let Event::LocalAnswer(answer) = wait_for(&mut host_events, "answer", |event| {
-        matches!(event, Event::LocalAnswer(_))
-    })
+    let Event::LocalAnswer(answer) = wait_keeping(
+        &mut host_events,
+        "answer",
+        |event| matches!(event, Event::LocalAnswer(_)),
+        &mut early_host,
+    )
     .await
     else {
         unreachable!()
@@ -189,6 +208,14 @@ async fn media_and_input_flow_through_the_relay() {
         host_seen: Seen::default(),
         controller_seen: Seen::default(),
     };
+    for event in &early_host {
+        session.host_seen.record("host", event, &session.controller);
+    }
+    for event in &early_controller {
+        session
+            .controller_seen
+            .record("controller", event, &session.host);
+    }
 
     session
         .pump_until("connection and data channels", |host, controller| {
