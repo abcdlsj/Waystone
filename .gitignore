@@ -15,3 +15,4 @@ client-ios/Vendor/
 /data/
 *.log
 .DS_Store
+.claude/
