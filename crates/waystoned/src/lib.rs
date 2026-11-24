@@ -9,10 +9,12 @@
 //! The library crate exists so the hub, store and pairing logic can be tested
 //! without binding sockets; the binary in `main.rs` only wires them together.
 
+pub mod auth;
 pub mod challenge;
 pub mod http;
 pub mod hub;
 pub mod instance;
+pub mod lan;
 pub mod pairing;
 pub mod store;
 pub mod tls;

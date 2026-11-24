@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     fn store() -> Store {
-        let mut store = Store::open(":memory:").unwrap();
+        let store = Store::open(":memory:").unwrap();
         store.ensure_instance("server", &"f".repeat(64)).unwrap();
         store
     }

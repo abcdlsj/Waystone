@@ -25,6 +25,7 @@ use waystone_proto::identity::{encode_public_key, Challenge, Identity};
 use waystone_proto::pairing::PairingUri;
 use waystone_proto::signal::{ClientMessage, ServerMessage};
 
+use waystoned::auth::AdminAuth;
 use waystoned::http::{router, AppState};
 use waystoned::hub::Hub;
 use waystoned::instance::Instance;
@@ -70,7 +71,7 @@ impl TestServer {
 
         let store = Arc::new(Store::open(Store::default_path(&dir)).unwrap());
         {
-            let mut writer = Store::open(Store::default_path(&dir)).unwrap();
+            let writer = Store::open(Store::default_path(&dir)).unwrap();
             writer
                 .ensure_instance(&instance.server_id, &instance.fingerprint)
                 .unwrap();
@@ -85,11 +86,11 @@ impl TestServer {
         let turn = String::from("127.0.0.1:3478");
         let state = AppState {
             store: store.clone(),
-            hub: Hub::new(instance.server_id.clone(), store.clone()),
+            hub: Hub::new(instance.server_id.clone(), store.clone()).unwrap(),
+            auth: Arc::new(AdminAuth::load(store.clone()).unwrap()),
             fingerprint: instance.fingerprint.clone(),
             endpoint: endpoint.clone(),
             turn_endpoint: turn.clone(),
-            admin_password_hash: None,
         };
 
         let tls = waystoned::tls::config(&instance).await.unwrap();
@@ -150,6 +151,72 @@ impl TestServer {
         socket.split()
     }
 
+    /// One HTTPS request over a fresh pinned TLS connection.
+    async fn http(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> HttpResponse {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let stream = TcpStream::connect(self.addr).await.unwrap();
+        let connector = tokio_rustls::TlsConnector::from(self.client_config());
+        let mut tls = connector
+            .connect(ServerName::try_from("localhost").unwrap(), stream)
+            .await
+            .unwrap();
+        let mut request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Length: {}\r\n",
+            self.addr.port(),
+            body.len()
+        );
+        for (name, value) in headers {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("\r\n");
+        request.push_str(body);
+        tls.write_all(request.as_bytes()).await.unwrap();
+
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // The server may close without a TLS close_notify; keep what arrived.
+        while let Ok(Ok(read)) =
+            tokio::time::timeout(Duration::from_secs(10), tls.read(&mut chunk)).await
+        {
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..read]);
+        }
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        let mut lines = head.lines();
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse().ok())
+            .expect("status line");
+        let headers = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        HttpResponse {
+            status,
+            headers,
+            body: body.to_string(),
+        }
+    }
+
+    /// Claims the instance and returns the session cookie pair (`name=value`).
+    async fn claim(&self, password: &str) -> String {
+        let response = self
+            .http("POST", "/claim", &[FORM], &format!("password={password}"))
+            .await;
+        assert_eq!(response.status, 303, "claim: {}", response.body);
+        response.session_cookie().expect("claim sets the cookie")
+    }
+
     fn pairing_uri(&self, role: Role) -> PairingUri {
         waystoned::pairing::create(
             &self.store,
@@ -159,6 +226,31 @@ impl TestServer {
             role,
         )
         .unwrap()
+    }
+}
+
+const FORM: (&str, &str) = ("Content-Type", "application/x-www-form-urlencoded");
+const JSON: (&str, &str) = ("Content-Type", "application/json");
+
+struct HttpResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl HttpResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn session_cookie(&self) -> Option<String> {
+        let cookie = self.header("set-cookie")?;
+        assert!(cookie.contains("HttpOnly") && cookie.contains("Secure"));
+        assert!(cookie.contains("SameSite=Strict"));
+        cookie.split(';').next().map(str::to_string)
     }
 }
 
@@ -193,6 +285,25 @@ impl Client {
         use base64::Engine;
         let signature = self.signing.sign(&challenge.signing_payload());
         base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    }
+}
+
+/// Next message that is not a presence update (busy/RTT changes arrive at any
+/// time and are not what these assertions are about).
+async fn next_signal<S>(stream: &mut S) -> ServerMessage
+where
+    S: StreamExt<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    loop {
+        match next_message(stream).await {
+            ServerMessage::PeerUpdate { .. } => continue,
+            other => return other,
+        }
     }
 }
 
@@ -404,7 +515,7 @@ async fn pairing_auth_and_session_flow() {
         ))
         .await
         .unwrap();
-    match next_message(&mut host_rx2).await {
+    match next_signal(&mut host_rx2).await {
         ServerMessage::RtcSignal { signal, .. } => match signal {
             waystone_proto::signal::RtcSignal::Offer { sdp } => assert_eq!(sdp, "v=0\r\n"),
             other => panic!("expected an offer, got {other:?}"),
@@ -425,8 +536,8 @@ async fn pairing_auth_and_session_flow() {
         .await
         .unwrap();
     for message in [
-        next_message(&mut controller_rx).await,
-        next_message(&mut host_rx2).await,
+        next_signal(&mut controller_rx).await,
+        next_signal(&mut host_rx2).await,
     ] {
         match message {
             ServerMessage::SessionEnded { reason, .. } => {
@@ -520,4 +631,227 @@ async fn pairing_token_is_single_use_over_the_wire() {
             assert!(matches!(message, ServerMessage::PairRejected { .. }));
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_api_requires_a_session() {
+    let _guard = test_lock();
+    let server = TestServer::start().await;
+
+    let panel = server.http("GET", "/", &[], "").await;
+    assert_eq!(panel.status, 200);
+    assert!(
+        panel.body.contains("action=\"/claim\""),
+        "unclaimed panel offers the claim form"
+    );
+    assert!(panel.header("content-security-policy").is_some());
+
+    for (method, path, body) in [
+        ("GET", "/api/status", ""),
+        ("GET", "/api/devices", ""),
+        ("POST", "/api/pair", r#"{"role":"host"}"#),
+        ("DELETE", "/api/devices/whatever", ""),
+        ("GET", "/pair/0123456789abcdef0123456789abcdef", ""),
+    ] {
+        let response = server.http(method, path, &[JSON], body).await;
+        assert_eq!(response.status, 401, "{method} {path} must need a login");
+    }
+    // A forged cookie does not help.
+    let response = server
+        .http(
+            "GET",
+            "/api/status",
+            &[("Cookie", "__Host-waystone_session=deadbeef")],
+            "",
+        )
+        .await;
+    assert_eq!(response.status, 401);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claim_is_one_shot_and_gates_the_api() {
+    let _guard = test_lock();
+    let server = TestServer::start().await;
+    let cookie = server.claim("first-password").await;
+
+    // A second claim is refused right away, without a restart.
+    let again = server
+        .http("POST", "/claim", &[FORM], "password=second-password")
+        .await;
+    assert_eq!(again.status, 409);
+    let panel = server.http("GET", "/", &[], "").await;
+    assert!(
+        panel.body.contains("action=\"/login\""),
+        "claimed panel asks for a login"
+    );
+
+    let wrong = server
+        .http("POST", "/login", &[FORM], "password=second-password")
+        .await;
+    assert_eq!(wrong.status, 401);
+    assert!(wrong.header("set-cookie").is_none());
+    let right = server
+        .http("POST", "/login", &[FORM], "password=first-password")
+        .await;
+    assert_eq!(right.status, 303);
+    assert!(right.session_cookie().is_some());
+
+    let status = server
+        .http("GET", "/api/status", &[("Cookie", &cookie)], "")
+        .await;
+    assert_eq!(status.status, 200, "{}", status.body);
+    assert!(status.body.contains(&server.fingerprint));
+
+    let pair = server
+        .http(
+            "POST",
+            "/api/pair",
+            &[("Cookie", &cookie), JSON],
+            r#"{"role":"controller"}"#,
+        )
+        .await;
+    assert_eq!(pair.status, 200, "{}", pair.body);
+    assert!(pair.body.contains("waystone://pair?"));
+
+    // Cross-site writes are refused even with the cookie attached.
+    let forged = server
+        .http(
+            "POST",
+            "/api/pair",
+            &[
+                ("Cookie", &cookie),
+                ("Origin", "https://evil.example"),
+                JSON,
+            ],
+            r#"{"role":"host"}"#,
+        )
+        .await;
+    assert_eq!(forged.status, 403);
+    let same_origin = format!("https://127.0.0.1:{}", server.addr.port());
+    let allowed = server
+        .http(
+            "POST",
+            "/api/pair",
+            &[("Cookie", &cookie), ("Origin", &same_origin), JSON],
+            r#"{"role":"host"}"#,
+        )
+        .await;
+    assert_eq!(allowed.status, 200);
+
+    // Values reflected into HTML are validated and escaped.
+    let reflected = server
+        .http(
+            "GET",
+            "/pair/%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+            &[("Cookie", &cookie)],
+            "",
+        )
+        .await;
+    assert_eq!(reflected.status, 400);
+    assert!(!reflected.body.contains("<script>"));
+
+    // Logging out kills the session server side.
+    let logout = server
+        .http("POST", "/logout", &[("Cookie", &cookie)], "")
+        .await;
+    assert_eq!(logout.status, 303);
+    let after = server
+        .http("GET", "/api/status", &[("Cookie", &cookie)], "")
+        .await;
+    assert_eq!(after.status, 401);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn websocket_from_a_foreign_origin_is_refused() {
+    let _guard = test_lock();
+    let server = TestServer::start().await;
+    let response = server
+        .http(
+            "GET",
+            "/ws",
+            &[
+                ("Origin", "https://evil.example"),
+                ("Upgrade", "websocket"),
+                ("Connection", "Upgrade"),
+                ("Sec-WebSocket-Version", "13"),
+                ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ],
+            "",
+        )
+        .await;
+    assert_eq!(response.status, 403);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revoking_a_device_kicks_its_live_socket() {
+    let _guard = test_lock();
+    let server = TestServer::start().await;
+    let cookie = server.claim("first-password").await;
+
+    // Pair and authenticate on one socket.
+    let phone = Client::new("iPhone", Platform::Ios);
+    let uri = server.pairing_uri(Role::Controller);
+    let (mut tx, mut rx) = server.connect().await;
+    let challenge = match next_message(&mut rx).await {
+        ServerMessage::Challenge {
+            nonce, server_id, ..
+        } => Challenge { nonce, server_id },
+        other => panic!("expected a challenge, got {other:?}"),
+    };
+    for message in [
+        ClientMessage::PairRequest {
+            token: uri.token.clone(),
+            device: phone.info.clone(),
+        },
+        ClientMessage::Auth {
+            identity: phone.identity(),
+            signature: phone.sign(&challenge),
+            protocol_version: waystone_proto::PROTOCOL_VERSION,
+            name: "iPhone".into(),
+        },
+    ] {
+        tx.send(tokio_tungstenite::tungstenite::Message::Text(
+            message.to_json().into(),
+        ))
+        .await
+        .unwrap();
+    }
+    loop {
+        match next_message(&mut rx).await {
+            ServerMessage::AuthOk { .. } => break,
+            ServerMessage::PairAccepted { .. } | ServerMessage::PeerUpdate { .. } => {}
+            other => panic!("expected AuthOk, got {other:?}"),
+        }
+    }
+
+    let response = server
+        .http(
+            "DELETE",
+            &format!("/api/devices/{}", phone.info.id),
+            &[("Cookie", &cookie)],
+            "",
+        )
+        .await;
+    assert_eq!(response.status, 204);
+
+    loop {
+        match next_message(&mut rx).await {
+            ServerMessage::AuthRejected { .. } => break,
+            ServerMessage::PeerUpdate { .. } => {}
+            other => panic!("expected AuthRejected, got {other:?}"),
+        }
+    }
+    // The server closes the socket after telling the device why.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.next().await {
+                None | Some(Err(_)) => break,
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the revoked socket must be closed");
+    assert!(server.store.device(&phone.info.id).unwrap().is_none());
 }
