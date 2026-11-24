@@ -22,7 +22,7 @@ use str0m::{
 };
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 use tracing::{debug, info, warn};
 
 use waystone_proto::Viewport;
@@ -269,6 +269,7 @@ pub struct Engine {
     media: mpsc::Sender<Media>,
     video: Arc<VideoQueue>,
     local_addr: SocketAddr,
+    stopped: watch::Receiver<bool>,
 }
 
 impl Engine {
@@ -285,17 +286,20 @@ impl Engine {
         let local_addr = socket.local_addr()?;
         let (tx, rx) = unbounded_channel();
         let (media, media_rx) = mpsc::channel(MEDIA_QUEUE);
+        let (stopped_tx, stopped) = watch::channel(false);
         let video = Arc::new(VideoQueue::default());
         let queue = video.clone();
         tokio::spawn(async move {
             let mut driver = Driver::new(config, socket, rx, media_rx, queue, local_addr);
             driver.run().await;
+            let _ = stopped_tx.send(true);
         });
         Ok(Engine {
             tx,
             media,
             video,
             local_addr,
+            stopped,
         })
     }
 
@@ -365,6 +369,13 @@ impl Engine {
     /// Tears the session down.
     pub fn shutdown(&self) {
         let _ = self.tx.send(Command::Shutdown);
+    }
+
+    /// Resolves once the engine task has finished (after [`Event::Closed`]).
+    pub async fn stopped(&self) {
+        let mut stopped = self.stopped.clone();
+        // An error means the task is gone, which is just as final.
+        let _ = stopped.wait_for(|done| *done).await;
     }
 }
 

@@ -17,9 +17,12 @@
 //! bytes 16..  payload
 //! ```
 
+use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use waystone_proto::Viewport;
 
@@ -62,22 +65,55 @@ impl ContextPtr {
     }
 }
 
+thread_local! {
+    /// Set while this thread is inside the event callback.
+    static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Decides whether the callback may still run.
+///
+/// Every invocation holds `calling` and checks `open` under it. Stopping clears
+/// `open` and then takes `calling` once, which waits for an invocation already
+/// in progress; any later invocation sees `open == false`. So once
+/// [`ws_engine_stop`] returns, the callback is never entered again.
+struct CallbackGate {
+    open: AtomicBool,
+    calling: Mutex<()>,
+}
+
+impl CallbackGate {
+    fn new() -> Self {
+        CallbackGate {
+            open: AtomicBool::new(true),
+            calling: Mutex::new(()),
+        }
+    }
+
+    fn invoke(&self, callback: WsEventCallback, kind: i32, data: &[u8], ctx: *mut c_void) {
+        let _calling = self.calling.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.open.load(Ordering::Acquire) {
+            return;
+        }
+        IN_CALLBACK.with(|flag| flag.set(true));
+        callback(kind, data.as_ptr(), data.len(), ctx);
+        IN_CALLBACK.with(|flag| flag.set(false));
+    }
+
+    /// Closes the gate; waits for a running callback unless called from it.
+    fn close(&self) {
+        self.open.store(false, Ordering::Release);
+        if !IN_CALLBACK.with(|flag| flag.get()) {
+            drop(self.calling.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+    }
+}
+
 /// Opaque engine handle.
 pub struct WsEngine {
     engine: Engine,
     runtime: tokio::runtime::Runtime,
-    /// Kept so tests can assert the callback identity; the closure passed to the
-    /// engine holds its own copy.
-    #[allow(dead_code)]
-    callback: WsEventCallback,
-    #[allow(dead_code)]
-    ctx: *mut c_void,
+    gate: Arc<CallbackGate>,
 }
-
-// The handle is only ever used from the thread that created it, but the runtime
-// keeps worker threads; the raw context pointer is re-sent to the same callback.
-unsafe impl Send for WsEngine {}
-unsafe impl Sync for WsEngine {}
 
 /// Options parsed from the JSON config passed to [`ws_engine_start`].
 #[derive(serde::Deserialize)]
@@ -98,6 +134,9 @@ struct StartConfig {
     /// `h265` (default) or `h264`.
     #[serde(default)]
     video_codec: VideoCodec,
+    /// Advertise only the TURN relay candidate.
+    #[serde(default)]
+    relay_only: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -146,7 +185,9 @@ pub unsafe extern "C" fn ws_engine_start(
     error_out: *mut c_char,
     error_len: usize,
 ) -> *mut WsEngine {
-    match start_inner(config_json, callback, ctx) {
+    let started = catch_unwind(AssertUnwindSafe(|| start_inner(config_json, callback, ctx)))
+        .unwrap_or_else(|_| Err("engine start panicked".into()));
+    match started {
         Ok(engine) => Box::into_raw(Box::new(engine)),
         Err(message) => {
             write_error(error_out, error_len, &message);
@@ -185,35 +226,47 @@ unsafe fn start_inner(
     // Media payloads are heap allocated by the engine and freed right after the
     // callback returns, so the callback must never retain the pointer.
     let context = ContextPtr(ctx);
+    let gate = Arc::new(CallbackGate::new());
+    let sink_gate = gate.clone();
     let sink = sink(move |event: Event| {
         let ctx = context.get();
-        match event {
-            Event::VideoFrame {
-                data,
-                keyframe,
-                rtp_time,
-            } => {
-                let flags = if keyframe { 1u8 } else { 0 };
-                let frame = encode_media(WS_EVENT_VIDEO as u8, flags, rtp_time, &data);
-                callback(WS_EVENT_VIDEO, frame.as_ptr(), frame.len(), ctx);
-            }
-            Event::AudioFrame { data, rtp_time } => {
-                let frame = encode_media(WS_EVENT_AUDIO as u8, 0, rtp_time, &data);
-                callback(WS_EVENT_AUDIO, frame.as_ptr(), frame.len(), ctx);
-            }
-            Event::Input { reliable, data } => {
-                let flags = if reliable { 2u8 } else { 0 };
-                let frame = encode_media(WS_EVENT_INPUT as u8, flags, 0, &data);
-                callback(WS_EVENT_INPUT, frame.as_ptr(), frame.len(), ctx);
-            }
-            other => {
-                let json = control_json(&other);
-                callback(WS_EVENT_CONTROL, json.as_ptr(), json.len(), ctx);
-            }
+        // A panic must not unwind into the engine task or across the C ABI.
+        let delivered = catch_unwind(AssertUnwindSafe(|| {
+            let (kind, bytes) = match event {
+                Event::VideoFrame {
+                    data,
+                    keyframe,
+                    rtp_time,
+                } => {
+                    let flags = if keyframe { 1u8 } else { 0 };
+                    (
+                        WS_EVENT_VIDEO,
+                        encode_media(WS_EVENT_VIDEO as u8, flags, rtp_time, &data),
+                    )
+                }
+                Event::AudioFrame { data, rtp_time } => (
+                    WS_EVENT_AUDIO,
+                    encode_media(WS_EVENT_AUDIO as u8, 0, rtp_time, &data),
+                ),
+                Event::Input { reliable, data } => {
+                    let flags = if reliable { 2u8 } else { 0 };
+                    (
+                        WS_EVENT_INPUT,
+                        encode_media(WS_EVENT_INPUT as u8, flags, 0, &data),
+                    )
+                }
+                other => (WS_EVENT_CONTROL, control_json(&other)),
+            };
+            sink_gate.invoke(callback, kind, &bytes, ctx);
+        }));
+        if delivered.is_err() {
+            tracing::error!("event delivery panicked; event dropped");
         }
     });
 
-    let mut engine_config = EngineConfig::new(role, sink).with_video_codec(config.video_codec);
+    let mut engine_config = EngineConfig::new(role, sink)
+        .with_video_codec(config.video_codec)
+        .with_relay_only(config.relay_only);
     if let Some(bind) = &config.bind {
         let address = bind
             .parse()
@@ -253,12 +306,16 @@ unsafe fn start_inner(
     Ok(WsEngine {
         engine,
         runtime,
-        callback,
-        ctx,
+        gate,
     })
 }
 
 /// Stops the engine and releases the handle.
+///
+/// Once this returns the callback is never invoked again, so `ctx` may be
+/// freed. It may be called from inside the callback: the teardown then
+/// finishes on a background thread, and no further events are delivered
+/// after the callback returns.
 ///
 /// # Safety
 ///
@@ -269,12 +326,32 @@ pub unsafe extern "C" fn ws_engine_stop(handle: *mut WsEngine) {
         return;
     }
     let engine = Box::from_raw(handle);
-    engine.engine.shutdown();
-    // Give the driver task a moment to emit its final event.
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    engine
-        .runtime
-        .shutdown_timeout(std::time::Duration::from_millis(500));
+    let stopped = catch_unwind(AssertUnwindSafe(move || {
+        engine.gate.close();
+        engine.engine.shutdown();
+        // Dropping a runtime from inside one (a callback runs on a worker
+        // thread) panics, so in that case the teardown moves to its own thread.
+        let inside_runtime = tokio::runtime::Handle::try_current().is_ok();
+        let teardown = move || {
+            let WsEngine {
+                engine, runtime, ..
+            } = *engine;
+            // Let the driver release its TURN allocation before the runtime
+            // goes away; the gate already keeps its last events from Swift.
+            runtime.block_on(async {
+                let _ = tokio::time::timeout(Duration::from_millis(500), engine.stopped()).await;
+            });
+            runtime.shutdown_timeout(Duration::from_millis(100));
+        };
+        if inside_runtime {
+            std::thread::spawn(teardown);
+        } else {
+            teardown();
+        }
+    }));
+    if stopped.is_err() {
+        tracing::error!("engine stop panicked");
+    }
 }
 
 /// Local UDP address of the transport, as `12345` in `buffer`.
@@ -561,9 +638,6 @@ impl MediaHeader {
     }
 }
 
-/// Handle used by tests to keep the callback alive.
-pub type SharedCallback = Arc<WsEventCallback>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +668,22 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(value["kind"], "local_candidate");
         assert_eq!(value["candidate"], "candidate:1");
+    }
+
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn count(_kind: i32, _data: *const u8, _len: usize, _ctx: *mut c_void) {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn closed_gate_never_calls_back() {
+        let gate = CallbackGate::new();
+        gate.invoke(count, WS_EVENT_CONTROL, b"{}", std::ptr::null_mut());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        gate.close();
+        gate.invoke(count, WS_EVENT_CONTROL, b"{}", std::ptr::null_mut());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
     }
 
     #[test]
