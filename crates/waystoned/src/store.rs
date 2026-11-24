@@ -105,13 +105,18 @@ impl Store {
                 expires_at INTEGER NOT NULL,
                 used_at    INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
         )?;
         Ok(())
     }
 
     /// Creates the instance row on first boot and returns the stored values.
-    pub fn ensure_instance(&mut self, server_id: &str, fingerprint: &str) -> Result<()> {
+    pub fn ensure_instance(&self, server_id: &str, fingerprint: &str) -> Result<()> {
         let now = unix_now();
         self.lock().execute(
             "INSERT OR IGNORE INTO instance (id, server_id, fingerprint, created_at)
@@ -144,13 +149,17 @@ impl Store {
             .context("instance row is missing")
     }
 
-    /// Hashes and stores the admin password. Only the hash is persisted.
-    pub fn set_admin_password_hash(&self, hash: &str) -> Result<()> {
-        self.lock().execute(
-            "UPDATE instance SET admin_token_hash = ?1 WHERE id = 1",
+    /// Stores the admin password hash, but only if none is set yet.
+    ///
+    /// Returns `false` when the instance was already claimed. The check and the
+    /// write are one statement, so two racing claims cannot both win.
+    pub fn claim_admin(&self, hash: &str) -> Result<bool> {
+        let affected = self.lock().execute(
+            "UPDATE instance SET admin_token_hash = ?1
+             WHERE id = 1 AND admin_token_hash IS NULL",
             params![hash],
         )?;
-        Ok(())
+        Ok(affected == 1)
     }
 
     /// The stored admin password hash, when the instance is already claimed.
@@ -164,6 +173,28 @@ impl Store {
             )
             .optional()?
             .flatten())
+    }
+
+    /// Stores a small piece of daemon configuration.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Reads a value written by [`Store::set_setting`].
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Creates a pairing token for a device that is about to enroll.
@@ -188,29 +219,22 @@ impl Store {
     /// Validates and consumes a pairing token.
     ///
     /// Returns the role the token was issued for, or `None` when the token is
-    /// unknown, expired or already used.
+    /// unknown, expired or already used. Validation and consumption are a single
+    /// statement: two devices racing with the same token cannot both enroll,
+    /// even through separate connections to the database.
     pub fn consume_pairing_token(&self, token: &str) -> Result<Option<Role>> {
-        let now = unix_now();
-        let row: Option<(String, i64, Option<i64>)> = self
+        let now = unix_now() as i64;
+        let role: Option<String> = self
             .lock()
             .query_row(
-                "SELECT role, expires_at, used_at FROM pairing_tokens WHERE token = ?1",
-                params![token],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                "UPDATE pairing_tokens SET used_at = ?1
+                 WHERE token = ?2 AND used_at IS NULL AND expires_at > ?1
+                 RETURNING role",
+                params![now, token],
+                |row| row.get(0),
             )
             .optional()?;
-
-        let Some((role, expires_at, used_at)) = row else {
-            return Ok(None);
-        };
-        if used_at.is_some() || (expires_at as u64) <= now {
-            return Ok(None);
-        }
-        self.lock().execute(
-            "UPDATE pairing_tokens SET used_at = ?1 WHERE token = ?2",
-            params![now as i64, token],
-        )?;
-        Ok(Some(role.parse().unwrap_or(Role::Controller)))
+        Ok(role.map(|role| role.parse().unwrap_or(Role::Controller)))
     }
 
     /// Inserts or refreshes a device.
@@ -354,7 +378,7 @@ mod tests {
 
     #[test]
     fn instance_identity_is_created_once() {
-        let mut store = store();
+        let store = store();
         store.ensure_instance("server-a", &"a".repeat(64)).unwrap();
         assert_eq!(store.server_id().unwrap(), "server-a");
 
@@ -365,15 +389,58 @@ mod tests {
     }
 
     #[test]
-    fn adming_password_hash_roundtrip() {
-        let mut store = store();
+    fn admin_claim_is_one_shot() {
+        let store = store();
         store.ensure_instance("s", &"f".repeat(64)).unwrap();
         assert!(store.admin_password_hash().unwrap().is_none());
-        store.set_admin_password_hash("hash").unwrap();
+        assert!(store.claim_admin("hash").unwrap());
+        assert!(
+            !store.claim_admin("other").unwrap(),
+            "second claim must lose"
+        );
         assert_eq!(
             store.admin_password_hash().unwrap().as_deref(),
             Some("hash")
         );
+    }
+
+    #[test]
+    fn settings_roundtrip() {
+        let store = store();
+        assert_eq!(store.setting("endpoint").unwrap(), None);
+        store.set_setting("endpoint", "a:1").unwrap();
+        store.set_setting("endpoint", "b:2").unwrap();
+        assert_eq!(store.setting("endpoint").unwrap().as_deref(), Some("b:2"));
+    }
+
+    #[test]
+    fn pairing_token_is_single_use_under_concurrency() {
+        // Separate connections to one file, like the daemon and the `pair`
+        // subcommand, so the database itself has to arbitrate.
+        let dir = std::env::temp_dir().join(format!("waystone-race-{}", rand::random::<u64>()));
+        let path = Store::default_path(&dir);
+        let token = Store::open(&path)
+            .unwrap()
+            .create_pairing_token(Role::Host, Duration::from_secs(60))
+            .unwrap()
+            .token;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let winners: usize = (0..8)
+            .map(|_| {
+                let store = Store::open(&path).unwrap();
+                let token = token.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.consume_pairing_token(&token).unwrap().is_some()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap() as usize)
+            .sum();
+        assert_eq!(winners, 1, "exactly one consumer may win the token");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -35,6 +35,7 @@ use waystone_proto::identity::{encode_public_key, Challenge, Identity};
 use waystone_proto::signal::{ByeReason, ClientMessage, RtcSignal, ServerMessage};
 use waystone_rtc::engine::{sink, Engine, EngineConfig, Event, SessionOptions};
 
+use waystoned::auth::AdminAuth;
 use waystoned::http::{router, AppState};
 use waystoned::hub::Hub;
 use waystoned::instance::Instance;
@@ -86,11 +87,11 @@ impl TestServer {
 
         let state = AppState {
             store: store.clone(),
-            hub: Hub::new(instance.server_id.clone(), store.clone()),
+            hub: Hub::new(instance.server_id.clone(), store.clone()).unwrap(),
+            auth: Arc::new(AdminAuth::load(store.clone()).unwrap()),
             fingerprint: instance.fingerprint.clone(),
             endpoint: format!("127.0.0.1:{}", addr.port()),
             turn_endpoint: "127.0.0.1:3478".into(),
-            admin_password_hash: None,
         };
 
         let tls = waystoned::tls::config(&instance).await.unwrap();

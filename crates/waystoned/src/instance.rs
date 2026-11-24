@@ -88,16 +88,10 @@ impl Instance {
         let cert_pem = cert.pem();
         let key_pem = key_pair.serialize_pem();
 
+        // Key first: a crash between the two writes then leaves no certificate,
+        // so the next boot regenerates both instead of loading a mismatch.
+        write_private(&key_file, key_pem.as_bytes())?;
         std::fs::write(&cert_file, &cert_pem)?;
-        std::fs::write(&key_file, &key_pem)?;
-        // The private key must not be world readable.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&key_file)?.permissions();
-            permissions.set_mode(0o600);
-            std::fs::set_permissions(&key_file, permissions)?;
-        }
 
         let fingerprint = fingerprint_from_pem(&cert_pem)?;
         Ok(Instance {
@@ -107,6 +101,71 @@ impl Instance {
             fingerprint,
         })
     }
+}
+
+/// Path of the shared secret the TURN server derives credentials from.
+pub fn turn_secret_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("turn.secret")
+}
+
+/// Loads the TURN shared secret, generating 256 random bits on first boot.
+///
+/// The secret is never derived from anything the server publishes (the server
+/// id travels in clear inside every challenge), otherwise anybody could mint
+/// relay credentials.
+pub fn load_or_create_turn_secret(data_dir: &Path) -> Result<String> {
+    let path = turn_secret_path(data_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(secret) if !secret.trim().is_empty() => return Ok(secret.trim().to_string()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", path.display()));
+        }
+    }
+    let mut raw = [0u8; 32];
+    rand::Rng::fill(&mut rand::rng(), &mut raw);
+    let secret = hex::encode(raw);
+    write_private(&path, secret.as_bytes())?;
+    Ok(secret)
+}
+
+/// Writes a secret file that is readable by the owner only.
+///
+/// The file is created with mode 0600 from the start (no window where it is
+/// world readable) under a temporary name, synced, then renamed over `path`
+/// so readers never observe a half written secret.
+pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .context("secret path has no file name")?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", random_id()));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("creating {}", temporary.display()))?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)
+            .with_context(|| format!("moving the secret into {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// SHA-256 fingerprint of a PEM encoded certificate, lowercase hex.
@@ -171,6 +230,27 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o077, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn turn_secret_is_random_private_and_stable() {
+        let dir = std::env::temp_dir().join(format!("waystone-secret-{}", random_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let instance = Instance::load_or_create(&dir, &["localhost".to_string()]).unwrap();
+        let first = load_or_create_turn_secret(&dir).unwrap();
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, instance.server_id, "must not reuse the public id");
+        assert_eq!(load_or_create_turn_secret(&dir).unwrap(), first);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(turn_secret_path(&dir))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }
