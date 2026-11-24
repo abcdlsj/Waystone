@@ -45,9 +45,7 @@ private struct CapsuleGroup: View {
         case .top:
             HStack(spacing: 10, content: content)
         case .bottomTrailing:
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(58), spacing: 8), count: 4), spacing: 8, content: content)
-                .frame(width: 4 * 58 + 3 * 8)
-                .environment(\.layoutDirection, .rightToLeft)
+            ThumbCluster(buttons: group.buttons, input: input)
         }
     }
 
@@ -68,6 +66,30 @@ private struct CapsuleGroup: View {
         case .top: return EdgeInsets(top: 10, leading: 0, bottom: 0, trailing: 0)
         case .bottomTrailing: return EdgeInsets(top: 0, leading: 0, bottom: 20, trailing: 60)
         }
+    }
+}
+
+/// Buttons in reading order, in rows of four, each row against the trailing
+/// edge. A preset lists its secondary keys first so the last, possibly short
+/// row holds the main actions right under the thumb.
+private struct ThumbCluster: View {
+    static let perRow = 4
+    let buttons: [HotkeyButton]
+    @ObservedObject var input: InputController
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            ForEach(rows, id: \.self) { range in
+                HStack(spacing: 8) {
+                    ForEach(buttons[range]) { HotkeyCapsule(button: $0, input: input) }
+                }
+            }
+        }
+    }
+
+    /// Seven buttons give rows 0..<4 and 4..<7.
+    private var rows: [Range<Int>] {
+        stride(from: 0, to: buttons.count, by: Self.perRow).map { $0..<min($0 + Self.perRow, buttons.count) }
     }
 }
 

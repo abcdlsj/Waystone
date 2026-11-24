@@ -15,6 +15,11 @@ OUT="$ROOT/client-ios/Vendor"
 
 cd "$ROOT"
 
+# Must match deploymentTarget in project.yml. rustc and the cc crate (which
+# builds the C parts of the crypto dependencies) both read it; without it they
+# target the SDK version and the app link warns about every object file.
+export IPHONEOS_DEPLOYMENT_TARGET=17.0
+
 if [ "$PROFILE" = "release" ]; then
   TARGET_DIR="release"
   BUILD=(cargo build --release)

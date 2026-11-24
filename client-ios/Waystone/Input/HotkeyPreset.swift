@@ -91,13 +91,13 @@ struct HotkeyPreset: Identifiable, Equatable {
             HotkeyGroup(
                 anchor: .bottomTrailing,
                 buttons: [
-                    HotkeyButton(title: "交互", cap: "F", action: .tap(KeyCode.letter("f")!)),
-                    HotkeyButton(title: "跳跃", cap: "Space", action: .tap(.space)),
-                    HotkeyButton(title: "地图", cap: "M", action: .tap(KeyCode.letter("m")!)),
                     HotkeyButton(title: "1", action: .tap(KeyCode.digit(1)!)),
                     HotkeyButton(title: "2", action: .tap(KeyCode.digit(2)!)),
                     HotkeyButton(title: "3", action: .tap(KeyCode.digit(3)!)),
                     HotkeyButton(title: "4", action: .tap(KeyCode.digit(4)!)),
+                    HotkeyButton(title: "地图", cap: "M", action: .tap(KeyCode.letter("m")!)),
+                    HotkeyButton(title: "跳跃", cap: "Space", action: .tap(.space)),
+                    HotkeyButton(title: "交互", cap: "F", action: .tap(KeyCode.letter("f")!)),
                 ])
         ],
         joystick: JoystickLayout(

@@ -62,8 +62,8 @@ final class PoolConnection: ObservableObject, Identifiable, SessionSignaling {
     @Published private(set) var status: Status = .connecting
     @Published private(set) var hosts: [Host] = []
 
-    let instance: Instance
-    var id: Instance.ID { instance.id }
+    nonisolated let instance: Instance
+    nonisolated var id: Instance.ID { instance.id }
     var isOnline: Bool { status == .online }
 
     /// Called once when a pairing token was accepted.
