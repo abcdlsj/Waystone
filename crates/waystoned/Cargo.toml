@@ -41,6 +41,7 @@ tokio-util = "0.7"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 turn = "0.17"
+async-trait = "0.1"
 hmac = "0.12"
 sha1 = "0.10"
 webrtc-util = "0.17"

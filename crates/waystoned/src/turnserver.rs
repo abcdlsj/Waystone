@@ -4,28 +4,110 @@
 //! discover their public address) and TURN allocations (used as the relayed
 //! fallback path). Credentials are derived from a shared secret, so the daemon
 //! never stores per-client TURN passwords.
+//!
+//! Relays never talk to loopback, unspecified, link-local, multicast or
+//! broadcast addresses: a TURN server is an open UDP forwarder for anyone with
+//! credentials, and those ranges would expose services on the server itself.
+//! Private ranges stay reachable because a self-hosted server usually relays
+//! for peers on its own LAN.
 
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
-use webrtc_util::vnet::net::Net;
+use tracing::{debug, info, warn};
+use webrtc_util::Conn;
 
 use turn::auth::{generate_auth_key, AuthHandler};
-use turn::relay::relay_static::RelayAddressGeneratorStatic;
+use turn::relay::RelayAddressGenerator;
 use turn::server::config::{ConnConfig, ServerConfig};
 use turn::server::Server;
 
 /// Realm advertised by the built-in server. Fixed so credentials stay valid
 /// across restarts.
 pub const REALM: &str = "waystone";
+
+/// Longest username accepted; real ones are `expiry:waystone`.
+const MAX_USERNAME: usize = 128;
+
+/// Options for [`TurnServer::start`].
+#[derive(Debug, Clone)]
+pub struct TurnServerConfig {
+    /// UDP address to listen on.
+    pub listen: SocketAddr,
+    /// Address advertised inside relayed candidates; for a NAT'ed host it must
+    /// be the public address, not the listen address.
+    pub public_ip: IpAddr,
+    /// Shared secret the credentials are derived from.
+    pub secret: String,
+    /// Lets relays reach loopback peers. Only for tests that run every party
+    /// on one machine; never enable it on a reachable server.
+    pub allow_loopback_peers: bool,
+}
+
+impl TurnServerConfig {
+    pub fn new(listen: SocketAddr, public_ip: IpAddr, secret: impl Into<String>) -> Self {
+        TurnServerConfig {
+            listen,
+            public_ip,
+            secret: secret.into(),
+            allow_loopback_peers: false,
+        }
+    }
+}
+
+/// A running TURN server.
+pub struct TurnServer {
+    server: Server,
+    local_addr: SocketAddr,
+}
+
+impl TurnServer {
+    /// Binds the listener and starts serving.
+    pub async fn start(config: TurnServerConfig) -> Result<TurnServer> {
+        let socket = UdpSocket::bind(config.listen)
+            .await
+            .with_context(|| format!("binding TURN listener {}", config.listen))?;
+        let local_addr = socket.local_addr()?;
+        info!(
+            "turn listening on {local_addr}, advertising {}",
+            config.public_ip
+        );
+
+        let server = Server::new(ServerConfig {
+            conn_configs: vec![ConnConfig {
+                conn: Arc::new(socket),
+                relay_addr_generator: Box::new(FilteredRelay {
+                    relay_address: config.public_ip,
+                    allow_loopback: config.allow_loopback_peers,
+                }),
+            }],
+            realm: REALM.to_owned(),
+            auth_handler: Arc::new(SecretAuth::new(&config.secret)),
+            channel_bind_timeout: Duration::from_secs(600),
+            alloc_close_notify: None,
+        })
+        .await
+        .context("starting the TURN server")?;
+
+        Ok(TurnServer { server, local_addr })
+    }
+
+    /// The address the listener is bound to.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Stops the server and releases every allocation.
+    pub async fn close(self) {
+        self.server.close().await.ok();
+    }
+}
 
 /// Runs the TURN server until `cancel` fires.
 ///
@@ -37,73 +119,175 @@ pub async fn run(
     secret: &str,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let socket = UdpSocket::bind(listen)
-        .await
-        .with_context(|| format!("binding TURN listener {listen}"))?;
-    info!("turn listening on {listen}, advertising {public_ip}");
-
-    let auth = Arc::new(SecretAuth::new(secret));
     let relay_ip = IpAddr::from_str(public_ip).unwrap_or_else(|_| {
         warn!("{public_ip} is not an IP address, using 127.0.0.1 for relayed candidates");
         IpAddr::from([127, 0, 0, 1])
     });
+    let server = TurnServer::start(TurnServerConfig::new(listen, relay_ip, secret)).await?;
+    cancel.cancelled().await;
+    info!("turn shutting down");
+    server.close().await;
+    Ok(())
+}
 
-    let server = Server::new(ServerConfig {
-        conn_configs: vec![ConnConfig {
-            conn: Arc::new(socket),
-            relay_addr_generator: Box::new(RelayAddressGeneratorStatic {
-                relay_address: relay_ip,
-                address: "0.0.0.0".to_owned(),
-                net: Arc::new(Net::new(None)),
-            }),
-        }],
-        realm: REALM.to_owned(),
-        auth_handler: auth,
-        channel_bind_timeout: Duration::from_secs(600),
-        alloc_close_notify: None,
-    })
-    .await
-    .context("starting the TURN server")?;
+/// True when a relay may exchange datagrams with `ip`.
+fn peer_allowed(ip: IpAddr, allow_loopback: bool) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    };
+    if ip.is_loopback() {
+        return allow_loopback;
+    }
+    if ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => !(v4.is_link_local() || v4.is_broadcast() || v4.octets()[0] == 0),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+    }
+}
 
-    tokio::select! {
-        _ = cancel.cancelled() => {
-            info!("turn shutting down");
-            server.close().await.ok();
+/// Allocates relay sockets that refuse forbidden peers.
+///
+/// turn 0.17 has no hook to reject a permission for a peer address, so the
+/// check sits on the relay socket itself: nothing is sent to, or accepted
+/// from, a forbidden address.
+struct FilteredRelay {
+    relay_address: IpAddr,
+    allow_loopback: bool,
+}
+
+#[async_trait]
+impl RelayAddressGenerator for FilteredRelay {
+    fn validate(&self) -> Result<(), turn::Error> {
+        Ok(())
+    }
+
+    fn supports_family(&self, use_ipv4: bool) -> bool {
+        self.relay_address.is_ipv4() == use_ipv4
+    }
+
+    async fn allocate_conn(
+        &self,
+        use_ipv4: bool,
+        requested_port: u16,
+    ) -> Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), turn::Error> {
+        if !self.supports_family(use_ipv4) {
+            return Err(turn::Error::ErrInvalidRequestedFamilyValue);
+        }
+        let bind = if use_ipv4 {
+            SocketAddr::from(([0, 0, 0, 0], requested_port))
+        } else {
+            SocketAddr::from(([0u16; 8], requested_port))
+        };
+        let socket = UdpSocket::bind(bind)
+            .await
+            .map_err(|error| turn::Error::Other(error.to_string()))?;
+        let mut relay_addr = socket
+            .local_addr()
+            .map_err(|error| turn::Error::Other(error.to_string()))?;
+        relay_addr.set_ip(self.relay_address);
+        let conn = FilteredConn {
+            socket,
+            allow_loopback: self.allow_loopback,
+        };
+        Ok((Arc::new(conn), relay_addr))
+    }
+}
+
+struct FilteredConn {
+    socket: UdpSocket,
+    allow_loopback: bool,
+}
+
+#[async_trait]
+impl Conn for FilteredConn {
+    async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
+        if !peer_allowed(addr.ip(), self.allow_loopback) {
+            return Err(forbidden(addr));
+        }
+        Ok(self.socket.connect(addr).await?)
+    }
+
+    async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
+        Ok(self.recv_from(buf).await?.0)
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        loop {
+            let (len, from) = self.socket.recv_from(buf).await?;
+            if peer_allowed(from.ip(), self.allow_loopback) {
+                return Ok((len, from));
+            }
+            debug!("relay dropped a datagram from forbidden peer {from}");
         }
     }
-    Ok(())
+
+    async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
+        Ok(self.socket.send(buf).await?)
+    }
+
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        if !peer_allowed(target.ip(), self.allow_loopback) {
+            debug!("relay refused to send to forbidden peer {target}");
+            return Err(forbidden(target));
+        }
+        Ok(self.socket.send_to(buf, target).await?)
+    }
+
+    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
+        Ok(self.socket.local_addr()?)
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        None
+    }
+
+    async fn close(&self) -> webrtc_util::Result<()> {
+        Ok(())
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
+fn forbidden(peer: SocketAddr) -> webrtc_util::Error {
+    webrtc_util::Error::Other(format!("relaying to {peer} is not allowed"))
 }
 
 /// Long term credentials derived from a shared secret.
 ///
-/// Username format is `expiry:name`; the password is `HMAC(secret, name)`. This is
-/// the same scheme coturn uses for `use-auth-secret`, which keeps the daemon free
-/// of per-user state.
+/// Username format is `expiry:name`, where `expiry` is a Unix timestamp; the
+/// password is `base64(HMAC-SHA1(secret, username))`. This is the scheme coturn
+/// uses for `use-auth-secret`, which keeps the daemon free of per-user state.
+///
+/// Nothing is cached: deriving a key is two hashes, and turn 0.17 already keeps
+/// the key of each live allocation, so refreshes keep working after expiry.
 struct SecretAuth {
-    keys: Mutex<HashMap<String, Vec<u8>>>,
     secret: String,
 }
 
 impl SecretAuth {
     fn new(secret: &str) -> Self {
         SecretAuth {
-            keys: Mutex::new(HashMap::new()),
             secret: secret.to_string(),
         }
     }
 
     fn key_for(&self, username: &str, realm: &str) -> Vec<u8> {
-        // Coturn compatible: password = base64(HMAC-SHA1(secret, username)).
-        use hmac::{Hmac, Mac};
-        use sha1::Sha1;
-        let mut mac =
-            <Hmac<Sha1> as Mac>::new_from_slice(self.secret.as_bytes()).expect("any key length");
-        mac.update(username.as_bytes());
-        use base64::Engine;
-        let password =
-            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-        generate_auth_key(username, realm, &password)
+        generate_auth_key(username, realm, &password_for(&self.secret, username))
     }
+}
+
+/// True when the expiry timestamp at the start of `username` is in the future.
+fn username_valid(username: &str, now: u64) -> bool {
+    if username.len() > MAX_USERNAME {
+        return false;
+    }
+    let expiry = username.split(':').next().unwrap_or_default();
+    matches!(expiry.parse::<u64>(), Ok(expiry) if expiry > now)
 }
 
 impl AuthHandler for SecretAuth {
@@ -111,41 +295,42 @@ impl AuthHandler for SecretAuth {
         &self,
         username: &str,
         realm: &str,
-        _src_addr: SocketAddr,
+        src_addr: SocketAddr,
     ) -> Result<Vec<u8>, turn::Error> {
-        // Cache because the TURN server asks for the key on every message.
-        let mut keys = self.keys.blocking_lock();
-        if let Some(key) = keys.get(username) {
-            return Ok(key.clone());
+        if !username_valid(username, unix_now()) {
+            debug!("rejecting expired or malformed TURN username from {src_addr}");
+            return Err(turn::Error::Other("credentials expired".into()));
         }
-        let key = self.key_for(username, realm);
-        keys.insert(username.to_string(), key.clone());
-        Ok(key)
+        Ok(self.key_for(username, realm))
     }
 }
 
-/// Builds a username/password pair clients can use, coturn `use-auth-secret` style.
-pub fn credentials(secret: &str, ttl: Duration) -> (String, String) {
-    let expiry = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        + ttl.as_secs();
-    let username = format!("{expiry}:waystone");
+}
+
+fn password_for(secret: &str, username: &str) -> String {
     use base64::Engine;
     use hmac::{Hmac, Mac};
     use sha1::Sha1;
     let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(secret.as_bytes()).expect("any key length");
     mac.update(username.as_bytes());
-    let password = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+}
+
+/// Builds a username/password pair clients can use, coturn `use-auth-secret` style.
+pub fn credentials(secret: &str, ttl: Duration) -> (String, String) {
+    let expiry = unix_now() + ttl.as_secs();
+    let username = format!("{expiry}:waystone");
+    let password = password_for(secret, &username);
     (username, password)
 }
 
 /// Kept so the daemon can log the credential lifetime it hands out.
 pub const CREDENTIAL_TTL: Duration = Duration::from_secs(3600);
-
-/// Channel used by tests to observe allocation events.
-pub type AllocationSender = mpsc::UnboundedSender<SocketAddr>;
 
 #[cfg(test)]
 mod tests {
@@ -168,6 +353,36 @@ mod tests {
         let second = auth.key_for("user", REALM);
         assert_eq!(first, second);
         assert_eq!(first.len(), 16);
+    }
+
+    #[test]
+    fn expired_and_malformed_usernames_are_rejected() {
+        let auth = SecretAuth::new("secret");
+        let source: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+        let (valid, _) = credentials("secret", Duration::from_secs(60));
+        assert!(auth.auth_handle(&valid, REALM, source).is_ok());
+        assert!(auth.auth_handle("1:waystone", REALM, source).is_err());
+        assert!(auth.auth_handle("waystone", REALM, source).is_err());
+        let long = format!("{}:{}", u64::MAX, "x".repeat(200));
+        assert!(auth.auth_handle(&long, REALM, source).is_err());
+    }
+
+    #[test]
+    fn forbidden_peers() {
+        let allowed = |ip: &str| peer_allowed(ip.parse().unwrap(), false);
+        assert!(!allowed("127.0.0.1"));
+        assert!(!allowed("::1"));
+        assert!(!allowed("::ffff:127.0.0.1"));
+        assert!(!allowed("0.0.0.0"));
+        assert!(!allowed("::"));
+        assert!(!allowed("224.0.0.1"));
+        assert!(!allowed("255.255.255.255"));
+        assert!(!allowed("169.254.1.1"));
+        assert!(!allowed("fe80::1"));
+        assert!(allowed("192.168.1.10"));
+        assert!(allowed("203.0.113.5"));
+        assert!(allowed("2001:db8::1"));
+        assert!(peer_allowed("127.0.0.1".parse().unwrap(), true));
     }
 
     #[tokio::test]

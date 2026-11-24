@@ -5,14 +5,47 @@
 //! is only accepted when the destination matches one of the local candidates.
 //! `recv_from` does not report that, so the destination is read from the
 //! ancillary data with `recvmsg`.
+//!
+//! On platforms without `recvmsg` (Windows) the destination is not reported and
+//! the caller derives it from the bound address or the route to the sender.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 
 use tokio::net::UdpSocket;
 
+/// One datagram plus the local address it was delivered to.
+pub struct Datagram {
+    pub len: usize,
+    pub source: SocketAddr,
+    /// Local address the datagram arrived on, when the platform reports it.
+    pub destination: Option<IpAddr>,
+}
+
+/// Enables destination address reporting; unsupported on this platform.
+#[cfg(not(unix))]
+pub fn enable_destination_info(_socket: &UdpSocket) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "destination addresses are not reported on this platform",
+    ))
+}
+
+/// Receives one datagram; the destination is never known on this platform.
+#[cfg(not(unix))]
+pub async fn recv_with_destination(socket: &UdpSocket, buffer: &mut [u8]) -> io::Result<Datagram> {
+    let (len, source) = socket.recv_from(buffer).await?;
+    Ok(Datagram {
+        len,
+        source,
+        destination: None,
+    })
+}
+
 /// Enables destination address reporting on `socket`.
+#[cfg(unix)]
 ///
 /// Both families are attempted and failures are tolerated individually: a socket
 /// bound to `0.0.0.0` rejects the IPv6 option with `EINVAL`, and vice versa.
@@ -61,19 +94,12 @@ pub fn enable_destination_info(socket: &UdpSocket) -> io::Result<()> {
     }
 }
 
-/// One datagram plus the local address it was delivered to.
-pub struct Datagram {
-    pub len: usize,
-    pub source: SocketAddr,
-    /// Local address the datagram arrived on, when the platform reports it.
-    pub destination: Option<IpAddr>,
-}
-
 /// Receives one datagram together with its destination address.
 ///
 /// `try_io` is used instead of `readable()` plus a raw `recvmsg`: it clears the
 /// tokio readiness flag when the raw read returns `WouldBlock`, so a spurious
 /// wake-up cannot turn into a busy loop that starves the runtime.
+#[cfg(unix)]
 pub async fn recv_with_destination(socket: &UdpSocket, buffer: &mut [u8]) -> io::Result<Datagram> {
     let fd = socket.as_raw_fd();
     loop {
@@ -90,6 +116,7 @@ pub async fn recv_with_destination(socket: &UdpSocket, buffer: &mut [u8]) -> io:
     }
 }
 
+#[cfg(unix)]
 fn try_recv(fd: RawFd, buffer: &mut [u8]) -> io::Result<Datagram> {
     let mut name: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     // Room for a few control messages; the kernel only ever sends one or two.
@@ -172,11 +199,15 @@ fn destination_from_control(header: &libc::msghdr) -> Option<IpAddr> {
     None
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
+))]
 fn destination_from_control(_header: &libc::msghdr) -> Option<IpAddr> {
     None
 }
 
+#[cfg(unix)]
 fn sockaddr_to_socket_addr(storage: &libc::sockaddr_storage) -> Option<SocketAddr> {
     match storage.ss_family as libc::c_int {
         libc::AF_INET => {
@@ -198,7 +229,7 @@ fn sockaddr_to_socket_addr(storage: &libc::sockaddr_storage) -> Option<SocketAdd
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

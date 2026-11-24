@@ -5,8 +5,10 @@
 //! break from the outside, exactly one task owns the [`Rtc`]. Other threads post
 //! commands into a channel and receive events through a callback.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer};
@@ -19,13 +21,14 @@ use str0m::{
     Candidate, CandidateKind, Event as RtcEvent, IceConnectionState, Input, Output, Rtc, RtcConfig,
 };
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{watch, Notify};
 use tracing::{debug, info, warn};
 
 use waystone_proto::Viewport;
 
-use crate::stun::{self, class, method, Builder, Message};
-use crate::turn::{self, Progress as TurnProgress, TurnAllocation};
+use crate::stun::{class, method, Builder, Message};
+use crate::turn::{Event as TurnEvent, Received as TurnReceived, TurnClient};
 
 pub use waystone_proto::VideoCodec;
 
@@ -97,6 +100,11 @@ pub enum Event {
     /// A data channel opened.
     ChannelOpen(String),
     /// Current path and health of the session.
+    ///
+    /// Emitted as soon as media starts flowing on a new candidate pair and
+    /// once per second with fresh statistics. `relayed` is true when the
+    /// selected pair uses a relay candidate on either side; the host clamps its
+    /// encoder to [`TurnConfig::relay_bitrate_ceiling`] while it is set.
     PathUpdate {
         rtt_ms: Option<u32>,
         relayed: bool,
@@ -104,7 +112,8 @@ pub enum Event {
     },
     /// The remote peer asked for a fresh keyframe.
     KeyframeRequest,
-    /// A frame was dropped because the session is not ready yet.
+    /// A video frame was dropped, because the session is not ready yet or the
+    /// engine fell behind and discarded the oldest queued frame.
     ///
     /// The host uses this to retry the keyframe request: the encoder produces a
     /// static frame only once, so dropping it silently would leave the viewer
@@ -123,7 +132,13 @@ pub struct TurnConfig {
     pub server: SocketAddr,
     pub username: String,
     pub password: String,
-    /// Video bitrate ceiling applied once the session falls back to relay.
+    /// Video bitrate ceiling for relayed sessions.
+    ///
+    /// The engine does not encode video, so it cannot enforce this itself: it
+    /// reports the path through [`Event::PathUpdate`] (`relayed` is true when the
+    /// selected candidate pair uses a relay candidate on either side) and the
+    /// application clamps its encoder to this value while relayed. When the
+    /// `WAYSTONE_BWE` estimator is enabled the engine also caps its target.
     pub relay_bitrate_ceiling: u32,
 }
 
@@ -140,6 +155,11 @@ pub struct EngineConfig {
     pub bind: Option<SocketAddr>,
     /// Codec the host encodes and the controller expects.
     pub video_codec: VideoCodec,
+    /// Gather and advertise only the relay candidate.
+    ///
+    /// Useful behind NATs that break hole punching (and for tests); requires
+    /// [`EngineConfig::turn`].
+    pub relay_only: bool,
     pub sink: EventSink,
 }
 
@@ -152,6 +172,7 @@ impl EngineConfig {
             turn: None,
             bind: None,
             video_codec: VideoCodec::H265,
+            relay_only: false,
             sink,
         }
     }
@@ -180,6 +201,12 @@ impl EngineConfig {
         self.bind = Some(bind);
         self
     }
+
+    /// Only gathers and advertises the TURN relay candidate.
+    pub fn with_relay_only(mut self, relay_only: bool) -> Self {
+        self.relay_only = relay_only;
+        self
+    }
 }
 
 /// Data channel label for high frequency pointer samples.
@@ -187,23 +214,62 @@ pub const CHANNEL_INPUT_FAST: &str = "input-fast";
 /// Data channel label for reliable state edges.
 pub const CHANNEL_INPUT_RELIABLE: &str = "input-reliable";
 
+/// Video frames waiting for the engine task. Older frames are dropped first:
+/// a stale frame is worth less than the newest one, and the drop is reported
+/// as [`Event::FrameDropped`] so the host can ask for a keyframe.
+const VIDEO_QUEUE: usize = 8;
+/// Audio packets and input frames waiting for the engine task.
+const MEDIA_QUEUE: usize = 512;
+
+/// Control commands. These are rare and must never be lost, so their channel
+/// is unbounded; media has bounded queues of its own.
 enum Command {
     Offer,
     AcceptOffer(String),
     AcceptAnswer(String),
     RemoteCandidate(String),
-    SendVideo { data: Vec<u8>, rtp_time: u64 },
-    SendAudio { data: Vec<u8>, rtp_time: u64 },
-    SendInput { reliable: bool, data: Vec<u8> },
     SetVideoBitrate(u32),
     Shutdown,
+}
+
+enum Media {
+    Audio { data: Vec<u8>, rtp_time: u64 },
+    Input { reliable: bool, data: Vec<u8> },
+}
+
+#[derive(Default)]
+struct VideoQueue {
+    frames: Mutex<VecDeque<(Vec<u8>, u64)>>,
+    dropped: AtomicBool,
+    notify: Notify,
+}
+
+impl VideoQueue {
+    fn push(&self, data: Vec<u8>, rtp_time: u64) {
+        {
+            let mut frames = self.frames.lock().unwrap_or_else(|e| e.into_inner());
+            if frames.len() >= VIDEO_QUEUE {
+                frames.pop_front();
+                self.dropped.store(true, Ordering::Relaxed);
+            }
+            frames.push_back((data, rtp_time));
+        }
+        self.notify.notify_one();
+    }
+
+    fn take(&self) -> VecDeque<(Vec<u8>, u64)> {
+        std::mem::take(&mut *self.frames.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 /// Handle used by the rest of the application.
 #[derive(Clone)]
 pub struct Engine {
     tx: UnboundedSender<Command>,
+    media: mpsc::Sender<Media>,
+    video: Arc<VideoQueue>,
     local_addr: SocketAddr,
+    stopped: watch::Receiver<bool>,
 }
 
 impl Engine {
@@ -219,11 +285,22 @@ impl Engine {
         }
         let local_addr = socket.local_addr()?;
         let (tx, rx) = unbounded_channel();
+        let (media, media_rx) = mpsc::channel(MEDIA_QUEUE);
+        let (stopped_tx, stopped) = watch::channel(false);
+        let video = Arc::new(VideoQueue::default());
+        let queue = video.clone();
         tokio::spawn(async move {
-            let mut driver = Driver::new(config, socket, rx, local_addr);
+            let mut driver = Driver::new(config, socket, rx, media_rx, queue, local_addr);
             driver.run().await;
+            let _ = stopped_tx.send(true);
         });
-        Ok(Engine { tx, local_addr })
+        Ok(Engine {
+            tx,
+            media,
+            video,
+            local_addr,
+            stopped,
+        })
     }
 
     /// The UDP address the engine is bound to.
@@ -254,18 +331,34 @@ impl Engine {
     /// Writes one encoded video frame.
     ///
     /// `data` is Annex-B and must carry the parameter sets when `keyframe` is set.
+    /// When the engine falls behind, the oldest queued frame is dropped and
+    /// [`Event::FrameDropped`] is reported.
     pub fn send_video(&self, data: Vec<u8>, rtp_time: u64) {
-        let _ = self.tx.send(Command::SendVideo { data, rtp_time });
+        self.video.push(data, rtp_time);
     }
 
-    /// Writes one Opus packet with a 48 kHz timestamp.
+    /// Writes one Opus packet with a 48 kHz timestamp. Dropped when the queue
+    /// is full.
     pub fn send_audio(&self, data: Vec<u8>, rtp_time: u64) {
-        let _ = self.tx.send(Command::SendAudio { data, rtp_time });
+        if self
+            .media
+            .try_send(Media::Audio { data, rtp_time })
+            .is_err()
+        {
+            debug!("audio queue full, dropping a packet");
+        }
     }
 
-    /// Sends an encoded input frame on the matching data channel.
+    /// Sends an encoded input frame on the matching data channel. Dropped when
+    /// the queue is full.
     pub fn send_input(&self, reliable: bool, data: Vec<u8>) {
-        let _ = self.tx.send(Command::SendInput { reliable, data });
+        if self
+            .media
+            .try_send(Media::Input { reliable, data })
+            .is_err()
+        {
+            debug!("input queue full, dropping a frame");
+        }
     }
 
     /// Caps the outgoing video bitrate; the encoder follows this value.
@@ -277,12 +370,36 @@ impl Engine {
     pub fn shutdown(&self) {
         let _ = self.tx.send(Command::Shutdown);
     }
+
+    /// Resolves once the engine task has finished (after [`Event::Closed`]).
+    pub async fn stopped(&self) {
+        let mut stopped = self.stopped.clone();
+        // An error means the task is gone, which is just as final.
+        let _ = stopped.wait_for(|done| *done).await;
+    }
 }
+
+/// Server reflexive discovery in flight. It runs alongside the session instead
+/// of before it, so the offer is never delayed; the candidate is trickled when
+/// the answer arrives.
+struct ReflexiveProbe {
+    server: SocketAddr,
+    transaction_id: [u8; 12],
+    request: Vec<u8>,
+    next_send: Instant,
+    rto: Duration,
+    transmissions: u32,
+}
+
+const REFLEXIVE_TRANSMISSIONS: u32 = 4;
+const REFLEXIVE_RTO: Duration = Duration::from_millis(250);
 
 struct Driver {
     config: EngineConfig,
     socket: UdpSocket,
     rx: UnboundedReceiver<Command>,
+    media_rx: mpsc::Receiver<Media>,
+    video: Arc<VideoQueue>,
     rtc: Rtc,
     local_addr: SocketAddr,
     video_mid: Option<Mid>,
@@ -291,10 +408,20 @@ struct Driver {
     reliable_channel: Option<ChannelId>,
     /// Pending offer handle, kept between `apply()` and `accept_answer()`.
     pending_offer: Option<str0m::change::SdpPendingOffer>,
-    turn: Option<TurnAllocation>,
-    /// Peer reached through the TURN allocation.
-    turn_peer: Option<SocketAddr>,
+    turn: Option<TurnClient>,
+    reflexive: Option<ReflexiveProbe>,
+    /// Remote relay candidates, used to tell whether the selected pair is
+    /// relayed on the remote side.
+    remote_relays: HashSet<SocketAddr>,
+    /// Local and remote address of the pair media currently flows on.
+    path: Option<(SocketAddr, SocketAddr)>,
     relayed: bool,
+    rtt_ms: Option<u32>,
+    estimated_bitrate: Option<u32>,
+    /// Local address each wildcard-socket peer is reached through, for
+    /// platforms that do not report datagram destinations.
+    routes: HashMap<SocketAddr, IpAddr>,
+    bwe_enabled: bool,
     video_bitrate: u32,
     /// Dropped frames, so the warning is logged a bounded number of times.
     video_drop_logged: u64,
@@ -307,6 +434,8 @@ impl Driver {
         config: EngineConfig,
         socket: UdpSocket,
         rx: UnboundedReceiver<Command>,
+        media_rx: mpsc::Receiver<Media>,
+        video: Arc<VideoQueue>,
         local_addr: SocketAddr,
     ) -> Self {
         // Both HEVC and H.264 are offered: HEVC is what every supported iPhone,
@@ -323,9 +452,11 @@ impl Driver {
         // the initial estimate, so the default is a fixed high ceiling with the
         // encoder doing the rate control.
         let rtc_config = rtc_config.set_stats_interval(Some(Duration::from_secs(1)));
-        let rtc_config = match std::env::var_os("WAYSTONE_BWE") {
-            Some(_) => rtc_config.enable_bwe(Some(str0m::bwe::Bitrate::mbps(2))),
-            None => rtc_config,
+        let bwe_enabled = std::env::var_os("WAYSTONE_BWE").is_some();
+        let rtc_config = if bwe_enabled {
+            rtc_config.enable_bwe(Some(str0m::bwe::Bitrate::mbps(2)))
+        } else {
+            rtc_config
         };
 
         let video_bitrate = config
@@ -338,6 +469,8 @@ impl Driver {
             config,
             socket,
             rx,
+            media_rx,
+            video,
             local_addr,
             video_mid: None,
             audio_mid: None,
@@ -345,8 +478,14 @@ impl Driver {
             reliable_channel: None,
             pending_offer: None,
             turn: None,
-            turn_peer: None,
+            reflexive: None,
+            remote_relays: HashSet::new(),
+            path: None,
             relayed: false,
+            rtt_ms: None,
+            estimated_bitrate: None,
+            routes: HashMap::new(),
+            bwe_enabled,
             video_bitrate,
             video_drop_logged: 0,
             connected: false,
@@ -358,6 +497,7 @@ impl Driver {
         self.gather_candidates().await;
         self.declare_local_media();
 
+        let mut buf = vec![0u8; 2048];
         loop {
             if self.closed {
                 break;
@@ -367,7 +507,6 @@ impl Driver {
             let sleep = tokio::time::sleep_until(deadline.into());
             tokio::pin!(sleep);
 
-            let mut buf = vec![0u8; 2048];
             // Deliberately not `biased`: with a video frame arriving every 16 ms
             // a biased select would drain commands first and starve the socket,
             // so TWCC feedback and NACKs would never be processed and the
@@ -377,26 +516,58 @@ impl Driver {
                     Some(command) => self.handle_command(command),
                     None => break,
                 },
+                Some(media) = self.media_rx.recv() => self.handle_media(media),
+                _ = self.video.notify.notified() => self.write_queued_video(),
                 received = crate::net::recv_with_destination(&self.socket, &mut buf) => match received {
                     Ok(datagram) => {
-                        let source = datagram.source;
-                        let destination = datagram.destination.unwrap_or(self.local_addr.ip());
-                        let payload = buf[..datagram.len].to_vec();
-                        self.handle_datagram(&payload, source, destination).await;
+                        let len = datagram.len;
+                        self.handle_datagram(&buf[..len], datagram.source, datagram.destination);
+                    }
+                    Err(error) if is_transient(&error) => {
+                        // An ICMP error from an earlier send (a dead candidate
+                        // pair) surfaces here on some platforms.
+                        debug!("socket read failed: {error}");
                     }
                     Err(error) => {
                         warn!("socket read failed: {error}");
                         break;
                     }
                 },
-                _ = &mut sleep => {
-                    self.rtc.handle_input(Input::Timeout(Instant::now())).ok();
-                }
+                _ = &mut sleep => self.handle_timeout(Instant::now()),
             }
         }
 
+        // Release the allocation instead of letting it linger for ten minutes.
+        if let Some(turn) = self.turn.as_mut() {
+            turn.close(Instant::now());
+        }
+        self.flush_turn().await;
+
         (self.config.sink)(Event::Closed("engine stopped".into()));
         info!("engine task finished");
+    }
+
+    fn handle_timeout(&mut self, now: Instant) {
+        self.rtc.handle_input(Input::Timeout(now)).ok();
+        if let Some(turn) = self.turn.as_mut() {
+            turn.handle_timeout(now);
+        }
+        if let Some(probe) = self.reflexive.as_mut() {
+            if now >= probe.next_send {
+                if probe.transmissions >= REFLEXIVE_TRANSMISSIONS {
+                    warn!("stun discovery via {} timed out", probe.server);
+                    self.reflexive = None;
+                } else {
+                    probe.transmissions += 1;
+                    probe.rto *= 2;
+                    probe.next_send = now + probe.rto;
+                    let (request, server) = (probe.request.clone(), probe.server);
+                    if let Err(error) = self.socket.try_send_to(&request, server) {
+                        debug!("stun request to {server} failed: {error}");
+                    }
+                }
+            }
+        }
     }
 
     /// Drains every queued output and returns the next wake-up deadline.
@@ -405,14 +576,26 @@ impl Driver {
     /// owner of the `Rtc`, so it may await here without breaking the invariant.
     async fn drain(&mut self) -> Instant {
         loop {
+            // TURN events can add a local candidate, which is an `Rtc` mutation,
+            // so they are handled before polling the session again.
+            self.flush_turn().await;
+            if self.handle_turn_events() {
+                continue;
+            }
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(deadline)) => {
-                    let turn_deadline = self.service_turn().await;
-                    return turn_deadline.map(|t| t.min(deadline)).unwrap_or(deadline);
+                    let turn = self.turn.as_ref().and_then(|turn| turn.poll_timeout());
+                    let probe = self.reflexive.as_ref().map(|probe| probe.next_send);
+                    return [Some(deadline), turn, probe]
+                        .into_iter()
+                        .flatten()
+                        .min()
+                        .unwrap_or(deadline);
                 }
                 Ok(Output::Transmit(transmit)) => {
                     let bytes: Vec<u8> = transmit.contents.into();
-                    self.send_datagram(transmit.destination, &bytes).await;
+                    self.send_transmit(transmit.source, transmit.destination, &bytes)
+                        .await;
                 }
                 Ok(Output::Event(event)) => self.handle_rtc_event(event),
                 Err(error) => {
@@ -423,24 +606,37 @@ impl Driver {
         }
     }
 
-    async fn send_datagram(&mut self, destination: SocketAddr, payload: &[u8]) {
-        // Traffic to the relayed peer goes through the TURN allocation, which
-        // needs channel binding to be confirmed first.
-        if self.turn_peer == Some(destination) {
-            let frame = match self.turn.as_ref() {
-                Some(turn) => turn.frame_channel_data(destination, payload),
-                None => None,
-            };
-            match frame {
-                Some(frame) => {
-                    if let Some(turn) = &self.turn {
+    /// Sends one datagram the session produced.
+    ///
+    /// A transmit whose source is our relay address is wrapped for the TURN
+    /// allocation (ChannelData or a Send indication) and goes to the server;
+    /// anything else goes straight to its destination.
+    async fn send_transmit(&mut self, source: SocketAddr, destination: SocketAddr, payload: &[u8]) {
+        if !Message::is_stun(payload) {
+            // Only the selected pair carries DTLS, SRTP and SCTP.
+            self.observe_path(source, destination);
+        }
+
+        if let Some(turn) = self.turn.as_mut() {
+            if turn.relayed() == Some(source) {
+                match turn.encapsulate(destination, payload) {
+                    Some(frame) => {
                         let server = turn.server();
-                        let _ = self.socket.send_to(&frame, server).await;
+                        if let Err(error) = self.socket.send_to(&frame, server).await {
+                            debug!("send to turn server {server} failed: {error}");
+                        }
+                    }
+                    None => {
+                        // Peer reflexive candidates show up without a trickled
+                        // candidate; open the path on first use.
+                        if !turn.knows_peer(destination) {
+                            turn.add_peer(destination, Instant::now());
+                        }
+                        debug!("relay path to {destination} not ready, dropping datagram");
                     }
                 }
-                None => debug!("relay path not ready, dropping datagram"),
+                return;
             }
-            return;
         }
 
         if let Err(error) = self.socket.send_to(payload, destination).await {
@@ -448,57 +644,143 @@ impl Driver {
         }
     }
 
-    /// Flushes TURN requests and drives the refresh timer.
-    ///
-    /// Returns the deadline the allocation wants to be polled at, if any.
-    async fn service_turn(&mut self) -> Option<Instant> {
-        let turn = self.turn.as_mut()?;
-        if turn.needs_refresh(Instant::now()) {
-            turn.refresh();
+    /// Sends the datagrams the TURN client queued.
+    async fn flush_turn(&mut self) {
+        let Some(turn) = self.turn.as_mut() else {
+            return;
+        };
+        let server = turn.server();
+        while let Some(datagram) = turn.poll_transmit() {
+            if let Err(error) = self.socket.send_to(&datagram, server).await {
+                debug!("send to turn server {server} failed: {error}");
+            }
         }
-        for datagram in turn.take_outgoing() {
-            let server = turn.server();
-            let _ = self.socket.send_to(&datagram, server).await;
-        }
-        Some(Instant::now() + turn::refresh_interval())
     }
 
-    async fn handle_datagram(&mut self, datagram: &[u8], from: SocketAddr, destination: IpAddr) {
-        // Traffic from the TURN server is either a STUN transaction response or
-        // ChannelData wrapping a peer datagram.
-        if self.turn.as_ref().map(|turn| turn.server()) == Some(from) {
-            if let Some((_channel, payload)) = turn::parse_channel_data(datagram) {
-                let peer = self.turn_peer;
-                if let Some(peer) = peer {
-                    self.feed(payload, peer, destination);
+    /// Reacts to TURN client events. Returns true when the session changed.
+    fn handle_turn_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Some(event) = self.turn.as_mut().and_then(|turn| turn.poll_event()) {
+            match event {
+                TurnEvent::Allocated(relayed) => {
+                    info!("turn allocation ready at {relayed}");
+                    let server = self.turn.as_ref().map(|turn| turn.server());
+                    let base = SocketAddr::new(
+                        server
+                            .and_then(|server| route_ip(server.ip()))
+                            .unwrap_or(self.local_addr.ip()),
+                        self.local_addr.port(),
+                    );
+                    match Candidate::relayed(relayed, base, "udp") {
+                        Ok(candidate) => self.add_local_candidate(candidate),
+                        Err(error) => warn!("relayed candidate rejected: {error}"),
+                    }
+                    changed = true;
                 }
-            }
-            if Message::is_stun(datagram) {
-                if let Some(turn) = self.turn.as_mut() {
-                    match turn.handle_message(datagram) {
-                        TurnProgress::Allocated(relayed) => {
-                            info!("turn allocation ready at {relayed}");
-                            self.announce_relayed(relayed);
-                        }
-                        TurnProgress::Failed { code, reason } => {
-                            warn!("turn rejected the request: {code} {reason}");
-                        }
-                        _ => {}
+                TurnEvent::Failed { code, reason } => {
+                    warn!("turn allocation failed: {code} {reason}");
+                    if self.config.relay_only {
+                        self.fail(format!("relay unavailable: {code} {reason}"));
+                        changed = true;
                     }
                 }
             }
-            let _ = self.service_turn().await;
+        }
+        changed
+    }
+
+    /// Records the pair media flows on and reports a path change.
+    fn observe_path(&mut self, local: SocketAddr, remote: SocketAddr) {
+        if self.path == Some((local, remote)) {
+            return;
+        }
+        self.path = Some((local, remote));
+        self.relayed = self.is_relayed(local, remote);
+        info!(
+            "media path {local} -> {remote} ({})",
+            if self.relayed { "relayed" } else { "direct" }
+        );
+        self.apply_bitrate_ceiling();
+        self.emit_path();
+    }
+
+    /// True when either end of the pair is a relay candidate.
+    fn is_relayed(&self, local: SocketAddr, remote: SocketAddr) -> bool {
+        let local_relay = self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.relayed() == Some(local));
+        local_relay || self.remote_relays.contains(&remote)
+    }
+
+    fn emit_path(&self) {
+        (self.config.sink)(Event::PathUpdate {
+            rtt_ms: self.rtt_ms,
+            relayed: self.relayed,
+            estimated_bitrate: self.estimated_bitrate,
+        });
+    }
+
+    fn handle_datagram(&mut self, datagram: &[u8], from: SocketAddr, destination: Option<IpAddr>) {
+        let now = Instant::now();
+        if self.handle_reflexive_response(datagram, from) {
+            return;
         }
 
-        self.feed(datagram, from, destination);
+        // Traffic from the TURN server is a transaction response or a peer
+        // datagram wrapped in ChannelData or a Data indication. Unwrapped peer
+        // datagrams arrived on our relay address, from the peer's address.
+        if let Some(turn) = self.turn.as_mut() {
+            if turn.server() == from {
+                match turn.handle_datagram(datagram, now) {
+                    TurnReceived::Peer { peer, payload } => {
+                        if let Some(relayed) = turn.relayed() {
+                            self.feed(&payload, peer, relayed);
+                        }
+                        return;
+                    }
+                    TurnReceived::Consumed => return,
+                    TurnReceived::NotTurn => {}
+                }
+            }
+        }
+
+        match self.resolve_destination(from, destination) {
+            Some(destination) => self.feed(datagram, from, destination),
+            None => debug!("dropping datagram from {from}: unknown destination"),
+        }
+    }
+
+    /// Picks the local address a datagram arrived on.
+    ///
+    /// ICE drops checks that did not arrive on a local candidate, so an
+    /// unspecified address is never handed to the session: when the platform
+    /// does not report it, the bound address or the route to the sender is used.
+    fn resolve_destination(
+        &mut self,
+        from: SocketAddr,
+        reported: Option<IpAddr>,
+    ) -> Option<SocketAddr> {
+        let port = self.local_addr.port();
+        if let Some(ip) = reported.filter(|ip| !ip.is_unspecified()) {
+            return Some(SocketAddr::new(ip, port));
+        }
+        if !self.local_addr.ip().is_unspecified() {
+            return Some(self.local_addr);
+        }
+        if let Some(ip) = self.routes.get(&from) {
+            return Some(SocketAddr::new(*ip, port));
+        }
+        let ip = route_ip(from.ip())?;
+        if self.routes.len() > 256 {
+            self.routes.clear();
+        }
+        self.routes.insert(from, ip);
+        Some(SocketAddr::new(ip, port))
     }
 
     /// Hands one datagram to the session.
-    ///
-    /// `destination` matters: ICE drops connectivity checks that did not arrive on
-    /// a local candidate, so a wildcard socket must report the real address.
-    fn feed(&mut self, datagram: &[u8], from: SocketAddr, destination: IpAddr) {
-        let destination = SocketAddr::new(destination, self.local_addr.port());
+    fn feed(&mut self, datagram: &[u8], from: SocketAddr, destination: SocketAddr) {
         let Ok(receive) = Receive::new(Protocol::Udp, from, destination, datagram) else {
             return;
         };
@@ -509,54 +791,89 @@ impl Driver {
 
     async fn gather_candidates(&mut self) {
         let port = self.local_addr.port();
-        // A socket bound to a concrete address can only be reached through that
-        // address, so advertising every interface would create dead candidates.
-        // A socket bound to `0.0.0.0` cannot send to an IPv6 address at all, so
-        // the candidate family follows the socket: otherwise every IPv6 host
-        // candidate is a guaranteed dead pair.
-        let ips = if self.local_addr.ip().is_unspecified() {
-            local_ips()
-                .into_iter()
-                .filter(|ip| ip.is_ipv4() == self.local_addr.is_ipv4())
-                .collect()
-        } else {
-            vec![self.local_addr.ip()]
-        };
-        for ip in ips {
-            if let Ok(candidate) = Candidate::host(SocketAddr::new(ip, port), "udp") {
-                self.add_local_candidate(candidate);
-            }
-        }
+        let now = Instant::now();
 
-        if let Some(stun_server) = self.config.stun {
-            match self.discover_reflexive(stun_server, port).await {
-                Ok(mapped) => {
-                    let base = SocketAddr::new(local_ip_for(stun_server.ip()), port);
-                    match Candidate::server_reflexive(mapped, base, "udp") {
-                        Ok(candidate) => self.add_local_candidate(candidate),
-                        Err(error) => warn!("srflx candidate rejected: {error}"),
-                    }
+        if self.config.relay_only {
+            if self.config.turn.is_none() {
+                warn!("relay only mode without a TURN server: no candidates at all");
+            }
+        } else {
+            // A socket bound to a concrete address can only be reached through
+            // that address, so advertising every interface would create dead
+            // candidates. A socket bound to `0.0.0.0` cannot send to an IPv6
+            // address at all, so the candidate family follows the socket:
+            // otherwise every IPv6 host candidate is a guaranteed dead pair.
+            let ips = if self.local_addr.ip().is_unspecified() {
+                local_ips()
+                    .into_iter()
+                    .filter(|ip| ip.is_ipv4() == self.local_addr.is_ipv4())
+                    .collect()
+            } else {
+                vec![self.local_addr.ip()]
+            };
+            for ip in ips {
+                if let Ok(candidate) = Candidate::host(SocketAddr::new(ip, port), "udp") {
+                    self.add_local_candidate(candidate);
                 }
-                Err(error) => warn!("stun discovery failed: {error}"),
+            }
+
+            if let Some(server) = self.config.stun {
+                let builder = Builder::new(method::BINDING, class::REQUEST);
+                let transaction_id = builder.id();
+                let request = builder.build(None, true);
+                if let Err(error) = self.socket.send_to(&request, server).await {
+                    warn!("stun request to {server} failed: {error}");
+                }
+                self.reflexive = Some(ReflexiveProbe {
+                    server,
+                    transaction_id,
+                    request,
+                    next_send: now + REFLEXIVE_RTO,
+                    rto: REFLEXIVE_RTO,
+                    transmissions: 1,
+                });
             }
         }
 
         if let Some(turn_config) = self.config.turn.clone() {
-            self.turn = Some(TurnAllocation::start(
+            self.turn = Some(TurnClient::new(
                 turn_config.server,
                 turn_config.username,
                 turn_config.password,
+                now,
             ));
-            let _ = self.service_turn().await;
+            self.flush_turn().await;
         }
     }
 
-    fn announce_relayed(&mut self, relayed: SocketAddr) {
-        let base = SocketAddr::new(local_ip_for(relayed.ip()), self.local_addr.port());
-        match Candidate::relayed(relayed, base, "udp") {
-            Ok(candidate) => self.add_local_candidate(candidate),
-            Err(error) => warn!("relayed candidate rejected: {error}"),
+    /// Consumes the answer to the reflexive probe. Returns true when it was one.
+    fn handle_reflexive_response(&mut self, datagram: &[u8], from: SocketAddr) -> bool {
+        let Some(probe) = self.reflexive.as_ref() else {
+            return false;
+        };
+        if from != probe.server || !Message::is_stun(datagram) {
+            return false;
         }
+        let Ok(message) = Message::parse(datagram) else {
+            return false;
+        };
+        if message.transaction_id != probe.transaction_id {
+            return false;
+        }
+        self.reflexive = None;
+        let Some(mapped) = message.xor_mapped_address.or(message.mapped_address) else {
+            warn!("stun reply from {from} without a mapped address");
+            return true;
+        };
+        let base = SocketAddr::new(
+            route_ip(from.ip()).unwrap_or(self.local_addr.ip()),
+            self.local_addr.port(),
+        );
+        match Candidate::server_reflexive(mapped, base, "udp") {
+            Ok(candidate) => self.add_local_candidate(candidate),
+            Err(error) => warn!("srflx candidate rejected: {error}"),
+        }
+        true
     }
 
     fn add_local_candidate(&mut self, candidate: Candidate) {
@@ -566,44 +883,32 @@ impl Driver {
         }
     }
 
-    /// Sends one STUN binding request and returns the mapped address.
-    async fn discover_reflexive(
-        &mut self,
-        server: SocketAddr,
-        port: u16,
-    ) -> Result<SocketAddr, std::io::Error> {
-        let request = Builder::new(method::BINDING, class::REQUEST).build(None, true);
-        self.socket.send_to(&request, server).await?;
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut buf = vec![0u8; 1024];
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(std::io::Error::other("stun timeout"));
-            }
-            let received = tokio::time::timeout(remaining, self.socket.recv_from(&mut buf)).await;
-            let (len, from) = match received {
-                Ok(Ok(value)) => value,
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Err(std::io::Error::other("stun timeout")),
-            };
-            if from != server || !Message::is_stun(&buf[..len]) {
-                // Anything else is legitimate traffic that arrived early; hand it
-                // to the session so nothing is lost.
-                self.feed(&buf[..len], from, self.local_addr.ip());
-                continue;
-            }
-            let message = Message::parse(&buf[..len]).map_err(std::io::Error::other)?;
-            let mapped = message
-                .xor_mapped_address
-                .or(message.mapped_address)
-                .ok_or_else(|| std::io::Error::other("stun reply without mapped address"))?;
-            let _ = port;
-            return Ok(mapped);
+    /// Records a remote candidate: relay candidates mark relayed paths, and
+    /// every address gets a TURN permission so the relay can reach it.
+    fn note_remote_candidate(&mut self, candidate: &Candidate) {
+        let address = candidate.addr();
+        if candidate.kind() == CandidateKind::Relayed {
+            self.remote_relays.insert(address);
+        }
+        if let Some(turn) = self.turn.as_mut() {
+            turn.add_peer(address, Instant::now());
         }
     }
 
+    /// Notes the candidates embedded in a remote SDP.
+    fn note_sdp_candidates(&mut self, sdp: &str) {
+        for line in sdp.lines() {
+            let Some(text) = line.trim().strip_prefix("a=") else {
+                continue;
+            };
+            if !text.starts_with("candidate:") {
+                continue;
+            }
+            if let Ok(candidate) = Candidate::from_sdp_string(text) {
+                self.note_remote_candidate(&candidate);
+            }
+        }
+    }
     fn declare_local_media(&mut self) {
         if self.config.role != Role::Controller {
             return;
@@ -704,35 +1009,31 @@ impl Driver {
                 });
             }
             RtcEvent::PeerStats(stats) => {
-                // The selected pair reports plain addresses, so the relay path is
-                // detected by matching the local candidate against the allocation.
-                let relayed = stats
-                    .selected_candidate_pair
-                    .as_ref()
-                    .and_then(|pair| {
-                        self.turn
-                            .as_ref()
-                            .map(|turn| turn.relayed() == Some(pair.local.addr))
-                    })
-                    .unwrap_or(self.relayed);
-                if relayed != self.relayed {
-                    self.apply_bitrate_ceiling(relayed);
+                self.rtt_ms = stats.rtt.map(|rtt| rtt.as_millis() as u32);
+                self.estimated_bitrate = stats.bwe_tx.map(|bitrate| bitrate.as_u64() as u32);
+                match stats.selected_candidate_pair.as_ref() {
+                    // The selected pair reports the local base address, which
+                    // for a relay candidate is the relayed address itself.
+                    Some(pair) if self.path != Some((pair.local.addr, pair.remote.addr)) => {
+                        // Reports the change itself.
+                        self.observe_path(pair.local.addr, pair.remote.addr);
+                    }
+                    _ => self.emit_path(),
                 }
-                (self.config.sink)(Event::PathUpdate {
-                    rtt_ms: stats.rtt.map(|rtt| rtt.as_millis() as u32),
-                    relayed,
-                    estimated_bitrate: stats.bwe_tx.map(|bitrate| bitrate.as_u64() as u32),
-                });
             }
             other => debug!("unhandled rtc event: {other:?}"),
         }
     }
 
-    /// Clamps the video bitrate when the session falls back to the relay.
-    fn apply_bitrate_ceiling(&mut self, relayed: bool) {
-        self.relayed = relayed;
+    /// Caps the bandwidth estimator target, which only exists with
+    /// `WAYSTONE_BWE`. The encoder itself is clamped by the application, see
+    /// [`TurnConfig::relay_bitrate_ceiling`].
+    fn apply_bitrate_ceiling(&mut self) {
+        if !self.bwe_enabled {
+            return;
+        }
         let ceiling = match &self.config.turn {
-            Some(turn) if relayed => turn.relay_bitrate_ceiling,
+            Some(turn) if self.relayed => turn.relay_bitrate_ceiling,
             _ => u32::MAX,
         };
         let target = self.video_bitrate.min(ceiling);
@@ -742,6 +1043,16 @@ impl Driver {
     }
 
     fn handle_command(&mut self, command: Command) {
+        match command {
+            Command::AcceptOffer(ref sdp) | Command::AcceptAnswer(ref sdp) => {
+                self.note_sdp_candidates(sdp);
+                self.handle_session_command(command);
+            }
+            other => self.handle_session_command(other),
+        }
+    }
+
+    fn handle_session_command(&mut self, command: Command) {
         match command {
             Command::Offer => {
                 if let Some((offer, pending)) = self.rtc.sdp_api().apply() {
@@ -768,30 +1079,42 @@ impl Driver {
                 },
                 Err(error) => self.fail(format!("parse answer: {error}")),
             },
-            Command::RemoteCandidate(text) => match Candidate::from_sdp_string(&text) {
-                Ok(candidate) => {
-                    let relayed = candidate.kind() == CandidateKind::Relayed;
-                    let address = candidate.addr();
-                    self.rtc.add_remote_candidate(candidate);
-                    if relayed {
-                        self.turn_peer = Some(address);
-                        if let Some(turn) = self.turn.as_mut() {
-                            turn.bind_channel(address);
-                        }
+            Command::RemoteCandidate(text) => {
+                // Accept both `candidate:...` and the `a=candidate:...` SDP form.
+                let text = text.trim();
+                let text = text.strip_prefix("a=").unwrap_or(text);
+                match Candidate::from_sdp_string(text) {
+                    Ok(candidate) => {
+                        self.note_remote_candidate(&candidate);
+                        self.rtc.add_remote_candidate(candidate);
                     }
+                    Err(error) => warn!("bad remote candidate: {error}"),
                 }
-                Err(error) => warn!("bad remote candidate: {error}"),
-            },
-            Command::SendVideo { data, rtp_time } => self.write_video(data, rtp_time),
-            Command::SendAudio { data, rtp_time } => self.write_audio(data, rtp_time),
-            Command::SendInput { reliable, data } => self.write_input(reliable, &data),
+            }
             Command::SetVideoBitrate(bits) => {
                 self.video_bitrate = bits;
-                self.apply_bitrate_ceiling(self.relayed);
+                self.apply_bitrate_ceiling();
             }
             Command::Shutdown => {
                 self.closed = true;
             }
+        }
+    }
+
+    fn handle_media(&mut self, media: Media) {
+        match media {
+            Media::Audio { data, rtp_time } => self.write_audio(data, rtp_time),
+            Media::Input { reliable, data } => self.write_input(reliable, &data),
+        }
+    }
+
+    fn write_queued_video(&mut self) {
+        if self.video.dropped.swap(false, Ordering::Relaxed) {
+            debug!("video queue overflowed, oldest frames dropped");
+            (self.config.sink)(Event::FrameDropped);
+        }
+        for (data, rtp_time) in self.video.take() {
+            self.write_video(data, rtp_time);
         }
     }
 
@@ -960,11 +1283,29 @@ fn is_sendable(ip: IpAddr) -> bool {
     socket.send_to(&[], SocketAddr::new(ip, 9)).is_ok()
 }
 
-fn local_ip_for(_remote: IpAddr) -> IpAddr {
-    local_ips()
-        .into_iter()
-        .next()
-        .unwrap_or(IpAddr::from([0, 0, 0, 0]))
+/// The local address the kernel would use to reach `remote`.
+///
+/// Connecting a UDP socket sends nothing; it only performs the route lookup.
+fn route_ip(remote: IpAddr) -> Option<IpAddr> {
+    let bind: SocketAddr = if remote.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0u16; 8], 0))
+    };
+    let socket = std::net::UdpSocket::bind(bind).ok()?;
+    socket.connect(SocketAddr::new(remote, 9)).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
+}
+
+/// Read errors caused by an earlier send rather than a broken socket.
+fn is_transient(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::Interrupted
+    )
 }
 
 /// Helper used by tests and the FFI layer to build a sink from a closure.
@@ -975,14 +1316,6 @@ where
     std::sync::Arc::new(f)
 }
 
-/// Maps a channel id back to its reliability class, for logging.
-pub fn channel_map() -> HashMap<&'static str, bool> {
-    HashMap::from([(CHANNEL_INPUT_FAST, false), (CHANNEL_INPUT_RELIABLE, true)])
-}
-
-/// Re-exported so callers can build STUN probes without depending on the module.
-pub use stun::Builder as StunBuilder;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -992,6 +1325,14 @@ mod tests {
         // A VM bridge on macOS reports the network address of its subnet.
         assert!(!is_sendable("192.168.215.0".parse().unwrap()));
         assert!(is_sendable("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn loopback_routes_to_loopback() {
+        assert_eq!(
+            route_ip("127.0.0.1".parse().unwrap()),
+            Some("127.0.0.1".parse().unwrap())
+        );
     }
 
     #[test]

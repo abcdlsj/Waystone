@@ -232,3 +232,106 @@ fn ffi_reports_invalid_json() {
         .into_owned();
     assert!(message.contains("JSON"), "unexpected: {message}");
 }
+
+/// State shared with [`stop_from_callback`].
+struct StopFromCallback {
+    armed: bool,
+    published: std::sync::atomic::AtomicBool,
+    handle: std::sync::atomic::AtomicPtr<waystone_rtc::ffi::WsEngine>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+extern "C" fn stop_from_callback(_kind: i32, _data: *const u8, _len: usize, ctx: *mut c_void) {
+    use std::sync::atomic::Ordering;
+    let state = unsafe { &*(ctx as *const StopFromCallback) };
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    if state.armed {
+        // Block the engine until the test has published the handle, so the
+        // first event is the one that stops it.
+        while !state.published.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    // Stop on the first event, from the engine's own worker thread.
+    let handle = state.handle.swap(std::ptr::null_mut(), Ordering::SeqCst);
+    if !handle.is_null() {
+        unsafe { ws_engine_stop(handle) };
+    }
+}
+
+#[test]
+fn ffi_stop_from_inside_the_callback_is_safe() {
+    use std::sync::atomic::Ordering;
+    let state = Box::new(StopFromCallback {
+        armed: true,
+        published: std::sync::atomic::AtomicBool::new(false),
+        handle: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let ctx = &*state as *const StopFromCallback as *mut c_void;
+    let config = CString::new(
+        r#"{"role":"controller","bind":"127.0.0.1:0",
+            "viewport":{"width":640,"height":480,"dpi":100,"fps":30}}"#,
+    )
+    .unwrap();
+    let mut error = [0i8; 256];
+    // The controller emits its offer on its own; the callback waits for the
+    // handle before acting on it.
+    let handle = unsafe {
+        ws_engine_start(
+            config.as_ptr(),
+            stop_from_callback,
+            ctx,
+            error.as_mut_ptr() as *mut std::ffi::c_char,
+            error.len(),
+        )
+    };
+    assert!(!handle.is_null());
+    state.handle.store(handle, Ordering::SeqCst);
+    state.published.store(true, Ordering::SeqCst);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !state.handle.load(Ordering::SeqCst).is_null() {
+        assert!(std::time::Instant::now() < deadline, "callback never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The stop happened inside the callback; nothing may follow it.
+    let calls = state.calls.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(state.calls.load(Ordering::SeqCst), calls);
+}
+
+#[test]
+fn ffi_no_callback_after_stop_returns() {
+    use std::sync::atomic::Ordering;
+    let state = Box::new(StopFromCallback {
+        armed: false,
+        published: std::sync::atomic::AtomicBool::new(false),
+        handle: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let ctx = &*state as *const StopFromCallback as *mut c_void;
+    let config = CString::new(
+        r#"{"role":"controller","bind":"127.0.0.1:0",
+            "viewport":{"width":640,"height":480,"dpi":100,"fps":30}}"#,
+    )
+    .unwrap();
+    let mut error = [0i8; 256];
+    let handle = unsafe {
+        ws_engine_start(
+            config.as_ptr(),
+            stop_from_callback,
+            ctx,
+            error.as_mut_ptr() as *mut std::ffi::c_char,
+            error.len(),
+        )
+    };
+    assert!(!handle.is_null());
+    unsafe { ws_engine_offer(handle) };
+    unsafe { ws_engine_stop(handle) };
+    let calls = state.calls.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(state.calls.load(Ordering::SeqCst), calls);
+    // Freeing the context now is what Swift does in deinit.
+    drop(state);
+}
