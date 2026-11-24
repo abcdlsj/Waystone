@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use waystone_proto::device::{DeviceId, DeviceInfo, Platform, Role};
 use waystone_proto::identity::encode_public_key;
+use waystone_proto::signal::ByeReason;
 
 /// Everything the agent needs to reconnect without user interaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,34 +21,25 @@ pub struct Config {
     pub fingerprint: String,
     /// Display name shown in the phone's device list.
     pub name: String,
-    /// Video bitrate ceiling before relay clamping, in bits per second.
+    /// Video bitrate for 1080p at 60 fps; other sizes scale from it.
     #[serde(default = "default_bitrate")]
     pub max_bitrate: u32,
-    /// Frame rate to request from the capture layer.
-    #[serde(default = "default_fps")]
-    pub fps: u32,
-    /// Capture resolution.
-    #[serde(default = "default_size")]
-    pub capture: (u32, u32),
-    /// Video codec: `h265` (default) or `h264`.
-    #[serde(default = "default_codec")]
-    pub codec: String,
-}
-
-fn default_codec() -> String {
-    "h265".to_string()
+    /// Lock the screen when a session ends without the user saying
+    /// otherwise: on a network timeout, or when the phone went away
+    /// (design doc 4.5, "离开自动锁屏").
+    #[serde(default = "default_true")]
+    pub lock_on_disconnect: bool,
+    /// Mute the speakers while streaming (design doc 4.4).
+    #[serde(default = "default_true")]
+    pub mute_speakers: bool,
 }
 
 fn default_bitrate() -> u32 {
     8_000_000
 }
 
-fn default_fps() -> u32 {
-    60
-}
-
-fn default_size() -> (u32, u32) {
-    (1920, 1080)
+fn default_true() -> bool {
+    true
 }
 
 impl Config {
@@ -65,10 +57,35 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, &text)?;
-        restrict(path)?;
-        Ok(())
+        write_private(path, serde_json::to_string_pretty(self)?.as_bytes())
+    }
+
+    pub fn new(endpoint: String, turn: String, fingerprint: String, name: String) -> Config {
+        Config {
+            endpoint,
+            turn,
+            fingerprint,
+            name,
+            max_bitrate: default_bitrate(),
+            lock_on_disconnect: true,
+            mute_speakers: true,
+        }
+    }
+
+    pub fn session_options(&self) -> crate::session::Options {
+        crate::session::Options {
+            bitrate_budget: self.max_bitrate,
+            mute_speakers: self.mute_speakers,
+        }
+    }
+
+    /// Whether ending a session for `reason` locks the screen.
+    pub fn locks_after(&self, reason: ByeReason) -> bool {
+        match reason {
+            ByeReason::LockAndExit => true,
+            ByeReason::UserHangup | ByeReason::HostError => false,
+            ByeReason::NetworkTimeout | ByeReason::PeerOffline => self.lock_on_disconnect,
+        }
     }
 
     /// Hostname with a sensible default.
@@ -100,8 +117,7 @@ impl DeviceKey {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, hex::encode(seed))?;
-            restrict(path)?;
+            write_private(path, hex::encode(seed).as_bytes())?;
             signing
         };
 
@@ -157,25 +173,34 @@ fn hostname() -> Option<String> {
     Some(String::from_utf8_lossy(&buffer[..end]).to_string())
 }
 
-#[cfg(unix)]
-fn restrict(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = std::fs::metadata(path)?.permissions();
-    permissions.set_mode(0o600);
-    std::fs::set_permissions(path, permissions)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 // `gethostname` is not exposed by std, and pulling in the whole libc crate for
 // one call is not worth it.
 extern "C" {
     #[link_name = "gethostname"]
     fn libc_gethostname(name: *mut i8, len: usize) -> i32;
+}
+
+/// Writes a file only the owner can read, without a window where it is
+/// briefly readable by others: a temporary file is created 0600, filled,
+/// and renamed over the target.
+fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| format!("writing {}", temporary.display()))?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -215,26 +240,38 @@ mod tests {
     }
 
     #[test]
+    fn lock_policy_follows_the_reason() {
+        let mut config = Config::new(String::new(), String::new(), String::new(), String::new());
+        assert!(config.locks_after(ByeReason::LockAndExit));
+        assert!(!config.locks_after(ByeReason::UserHangup));
+        assert!(config.locks_after(ByeReason::NetworkTimeout));
+        config.lock_on_disconnect = false;
+        assert!(!config.locks_after(ByeReason::PeerOffline));
+        assert!(config.locks_after(ByeReason::LockAndExit));
+    }
+
+    #[test]
     fn config_roundtrip() {
         let dir = std::env::temp_dir().join(format!("waystone-host-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
-        let config = Config {
-            endpoint: "example:8443".into(),
-            turn: "example:3478".into(),
-            fingerprint: "a".repeat(64),
-            name: "Mac Studio".into(),
-            max_bitrate: 6_000_000,
-            fps: 45,
-            capture: (2560, 1440),
-            codec: "h264".into(),
-        };
+        let mut config = Config::new(
+            "example:8443".into(),
+            "example:3478".into(),
+            "a".repeat(64),
+            "Mac Studio".into(),
+        );
+        config.max_bitrate = 6_000_000;
+        config.lock_on_disconnect = false;
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.endpoint, config.endpoint);
         assert_eq!(loaded.max_bitrate, 6_000_000);
-        assert_eq!(loaded.capture, (2560, 1440));
-        assert_eq!(loaded.codec, "h264");
+        assert!(!loaded.lock_on_disconnect);
+        assert!(loaded.mute_speakers);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

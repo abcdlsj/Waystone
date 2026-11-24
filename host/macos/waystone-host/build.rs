@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=swift/Capture.swift");
+    println!("cargo:rerun-if-changed=swift");
     println!("cargo:rerun-if-changed=build.rs");
 
     // Only macOS can build the host agent; other targets get an empty archive so
@@ -21,7 +21,12 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
-    let source = PathBuf::from("swift/Capture.swift");
+    let mut sources: Vec<PathBuf> = std::fs::read_dir("swift")
+        .expect("swift/ holds the media layer")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
+        .collect();
+    sources.sort();
     let object = out_dir.join("Capture.o");
     let archive = out_dir.join("libwaystone_capture.a");
     let module_cache = out_dir.join("swift-module-cache");
@@ -37,6 +42,7 @@ fn main() {
         .args([
             "-O",
             "-parse-as-library",
+            "-wmo",
             "-emit-object",
             "-module-name",
             "WaystoneCapture",
@@ -45,7 +51,7 @@ fn main() {
             "-o",
         ])
         .arg(&object)
-        .arg(&source)
+        .args(&sources)
         .env("SWIFT_MODULECACHE_PATH", &module_cache)
         .env("CLANG_MODULE_CACHE_PATH", &module_cache)
         .status()
@@ -78,6 +84,9 @@ fn main() {
         "CoreGraphics",
         "AudioToolbox",
         "AVFoundation",
+        "ApplicationServices",
+        "CoreAudio",
+        "IOKit",
         "Foundation",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
