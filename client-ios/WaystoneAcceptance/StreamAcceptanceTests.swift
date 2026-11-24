@@ -19,7 +19,12 @@ final class StreamAcceptanceTests: XCTestCase {
         if let link = environment["WAYSTONE_PAIR_URI"] {
             app.launchEnvironment["WAYSTONE_PAIR_URI"] = link
         }
+        XCUIDevice.shared.orientation = .portrait
         app.launch()
+    }
+
+    override func tearDown() {
+        XCUIDevice.shared.orientation = .portrait
     }
 
     func testPairStreamDriveAndHangUp() throws {
@@ -30,9 +35,14 @@ final class StreamAcceptanceTests: XCTestCase {
         shoot("01-home")
 
         host.tap()
-        // The stream is live once the connecting overlay goes away.
+        // The stream is live once the connecting overlay goes away; on a LAN
+        // that can happen before the overlay is ever observed.
+        let surface = app.descendants(matching: .any)["stream-surface"].firstMatch
+        XCTAssertTrue(surface.waitForExistence(timeout: 5), "tapping the host did not open the stream")
+        // The stream allows either landscape; pinning one keeps the screenshots
+        // the right way up (see `upright`).
+        XCUIDevice.shared.orientation = .landscapeLeft
         let connecting = app.descendants(matching: .any)["connecting"]
-        XCTAssertTrue(connecting.waitForExistence(timeout: 5), "tapping the host did not open the stream")
         let live = waitUntil(30) { !connecting.exists }
         if !live { print(app.debugDescription) }
         XCTAssertTrue(live, "no picture within 30 s")
@@ -51,7 +61,7 @@ final class StreamAcceptanceTests: XCTestCase {
         center.tap()
         point(0.3, 0.5).press(forDuration: 0, thenDragTo: point(0.6, 0.5), withVelocity: .slow, thenHoldForDuration: 0)
         point(0.4, 0.4).press(forDuration: 0.4, thenDragTo: point(0.55, 0.6))
-        app.descendants(matching: .any)["stream-surface"].firstMatch.twoFingerTap()
+        surface.twoFingerTap()
         sleep(1)
 
         // A capsule from the card preset.
@@ -120,7 +130,18 @@ final class StreamAcceptanceTests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
         if let shots {
-            try? shot.pngRepresentation.write(to: shots.appendingPathComponent("\(name).png"))
+            try? upright(shot.image).pngData()?.write(to: shots.appendingPathComponent("\(name).png"))
+        }
+    }
+
+    /// A landscape screenshot keeps portrait pixels plus an orientation flag,
+    /// which `pngData()` drops; redrawing bakes the rotation in.
+    private func upright(_ image: UIImage) -> UIImage {
+        guard image.imageOrientation != .up else { return image }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+            image.draw(at: .zero)
         }
     }
 
