@@ -25,7 +25,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.waystone.app
         INFOPLIST_FILE: Waystone/Info.plist
-        SWIFT_OBJC_BRIDGING_HEADER: Waystone/Transport/Bridging-Header.h
+        SWIFT_OBJC_BRIDGING_HEADER: Waystone/Stream/Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/Vendor/include
@@ -51,22 +51,12 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: WaystoneTests
-      - path: Waystone/Models
-      - path: Waystone/Transport/Transport.swift
-      - path: Waystone/Media/VideoDecoder.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.waystone.app.tests
         GENERATE_INFOPLIST_FILE: YES
-        SWIFT_OBJC_BRIDGING_HEADER: Waystone/Transport/Bridging-Header.h
-        HEADER_SEARCH_PATHS:
-          - $(inherited)
-          - $(SRCROOT)/Vendor/include
     dependencies:
       - target: Waystone
-      - framework: Vendor/WaystoneRTC.xcframework
-        embed: false
-        codeSign: false
 
 schemes:
   Waystone:

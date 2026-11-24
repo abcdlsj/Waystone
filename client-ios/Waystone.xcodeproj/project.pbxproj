@@ -7,45 +7,58 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		053856FA8C5556A5EF1449B6 /* StreamPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4FA4EE62A598DDF0666035 /* StreamPreferences.swift */; };
+		077F44B07D9AC067E6474CB1 /* StreamSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0B864A532D97C959E9FC1F2 /* StreamSession.swift */; };
+		0848653850C7CBB24B881554 /* DirectTouchEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A99DFB2DFECC5B0CD785762 /* DirectTouchEngine.swift */; };
+		0BCA93AB0FC8DEC429F54CA1 /* InputControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE163B66FEDE00BBDF751331 /* InputControllerTests.swift */; };
+		152431C72B4E4847A1692CD7 /* MediaPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A345A03C9EABFF863839611D /* MediaPipeline.swift */; };
 		16DDE2FB594A3EDF853EE592 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 32E402DEC00ED797D6FA192F /* VideoToolbox.framework */; };
-		18BB31479C61927EBCD1A1C6 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF9661F908556707DC9FB7DA /* Transport.swift */; };
-		22C32E2C73B6496305A2F8C3 /* InstanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF202BE216B6FED109B3C71 /* InstanceStore.swift */; };
-		243A4E649EDE99B1A81EE1D3 /* SessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B533B8F58AECA3B8B2BA405 /* SessionController.swift */; };
-		27402B22712707EBA14E7694 /* Instance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C82C4200C6C99179C5FC501B /* Instance.swift */; };
+		17338250B0B885515C6D828C /* Haptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DDAA958F1396D323E200E5B /* Haptics.swift */; };
+		1C8974CB687579CCFA0E5B78 /* StreamSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = D107803C2FF6C9E1EEB797FA /* StreamSurface.swift */; };
+		214CE0CEFBD6365DC1C15D2D /* HotkeyLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7950869B76B7DD6DB484E261 /* HotkeyLayer.swift */; };
 		29394394EA4E64AEA53C8617 /* WaystoneRTC.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0BF6CD7E43F4EE87770D7FC3 /* WaystoneRTC.xcframework */; };
-		371C5178FA3114DCF1483383 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D60F03A8CC4166E5AABC3F /* HomeView.swift */; };
-		40333D6C72A36045ED036C6C /* GestureEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4CE6C231262FABCCEB2A3F0 /* GestureEngineTests.swift */; };
+		299BCB36702E76278ECDA611 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51EC37FF9E52251C21DF6B40 /* Wire.swift */; };
+		310E42A4596C2EC01D84E26A /* ProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2CDB5A78ACDCDFF71780765 /* ProtocolTests.swift */; };
+		335F104E52EDF07B141F3B80 /* SoftKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3229F2C658B7F075492AE91 /* SoftKeyboard.swift */; };
+		3444EC9046FC6C57F6287868 /* TrackpadEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01480BA7FFF0DC63C731FA4C /* TrackpadEngineTests.swift */; };
 		4092F8CAF8A0186FBF148B40 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C38803269209AC9370049BDA /* Metal.framework */; };
-		423D0BFE25D1ADFD71E9B2AE /* InstanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF202BE216B6FED109B3C71 /* InstanceStore.swift */; };
-		476A71392AE86D65CA70F37D /* StreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 913A0F9829904037060DC9F3 /* StreamView.swift */; };
-		5114A047D9B58A2C5309E4B6 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01720D03C7CA7E60745AB157 /* Wire.swift */; };
-		523F17B38B42538EC569C238 /* GestureEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E48D1AB817D8C9F005031D29 /* GestureEngine.swift */; };
+		48FABB14B6DAD2A72F46B442 /* PoolConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16E070A0BB46FB149F22477D /* PoolConnection.swift */; };
+		4C23B8268840E8E149300D9E /* PictureGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E028B56CD56E2CBD8C03FE5 /* PictureGeometryTests.swift */; };
+		4DB08C6CFF46849B01DD2F99 /* PairingLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2483AF36FD46912DEC4EC8CF /* PairingLink.swift */; };
+		4DE68E2E0C3B3BB6657B5E91 /* Instance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 961FC20ED255BC9F320227EC /* Instance.swift */; };
 		528B81780E0DB8EC7BCAA5DE /* VisionKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 08CD5B113F570CE1844E64F0 /* VisionKit.framework */; };
 		57D85BF27CF61FE28819137E /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8510C078706589B0045E4824 /* CoreVideo.framework */; };
-		5CC87D8D57555B869F57AF75 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F21B9139DEDD50E250A9F63 /* DeviceIdentity.swift */; };
 		6120FEE06D681B3F91A7FC14 /* VideoDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6932C79015F68C0F8A0B56D3 /* VideoDecoderTests.swift */; };
-		6681179AF3DB0BD218248F33 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F21B9139DEDD50E250A9F63 /* DeviceIdentity.swift */; };
-		6FD8EDB8FF7DCA429C73EBD0 /* PairingScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A11AD4E8984BD1A80AFD40D /* PairingScannerView.swift */; };
+		66A52B809954A454D686A7D4 /* StreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E45E2AA276B2DBA758BC86E /* StreamView.swift */; };
+		78FC99A56D437F2FC9FBB1F3 /* WaystoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D69B10C47EAB3C62FD12BE8 /* WaystoneApp.swift */; };
+		796FD7D33889BE0CC0A7045D /* TrackpadEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AC361AB577CE9A7F7E71980 /* TrackpadEngine.swift */; };
 		7C2BC1AAF294AC7824139D0E /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5BDCB3E95F40559531F8238 /* AudioPlayer.swift */; };
-		7C7A163FA7A18D0619FCFA68 /* Instance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C82C4200C6C99179C5FC501B /* Instance.swift */; };
 		899C8AD2C1A572F3CD200D5E /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2E5979C80B232599CEFE878D /* AVFoundation.framework */; };
 		8C0D2D60D53AA3124C0F2041 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BAA1671634288EC6383A1962 /* AudioToolbox.framework */; };
+		8E650F62D7088D03522696A6 /* TouchEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A90F771EF464DDA5DFA1CD9 /* TouchEngine.swift */; };
 		8F9F6CF5C5A4C30C08CA0B62 /* h264-keyframe.h264 in Resources */ = {isa = PBXBuildFile; fileRef = DB469B485A709EBC801B53BB /* h264-keyframe.h264 */; };
+		905D7838A89DA5B6EB2335EF /* DirectTouchEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27E2B3899B88A9A4A76CDE2B /* DirectTouchEngineTests.swift */; };
 		9563427440828B8FF9C7BD4B /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FB9FA068DC3B05F8E48227DB /* Security.framework */; };
 		9605AE0D61F92BB5C5D46C29 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 81BEB2CFB7A6F8B1A14F6E3F /* MetalKit.framework */; };
+		9910E0D92BEEC722A517D24D /* FloatingBall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C56B8FF99A8DAF1853BD521 /* FloatingBall.swift */; };
 		9A1356972D844EBE3BB679C8 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E02E0883D140621A66983AB /* VideoView.swift */; };
-		A630B251907E4F35B37123FF /* WaystoneRTC.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0BF6CD7E43F4EE87770D7FC3 /* WaystoneRTC.xcframework */; };
-		C097A78E5302A57C24FEE140 /* InputFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78623DAFE4918F0D7649B053 /* InputFrame.swift */; };
-		C227E82BFF798DE26B1C12A9 /* WaystoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 611D3057E739D15AD3DF7216 /* WaystoneApp.swift */; };
-		C2A4ECE9890BDD74765ABC42 /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */; };
+		9EBBD171F3A62CFE65A3075E /* PairingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B0BC552508B02632A2C903C /* PairingSheet.swift */; };
+		A7AA30B8FFB496F48525B33C /* PictureGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95F8759E6A4FDC5A7F3FB7D2 /* PictureGeometry.swift */; };
+		A8E518984C997FA35F3CCDFA /* InputEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE90ED51D0C7787D1C882B80 /* InputEvent.swift */; };
+		B07B639726AB19B588666CB1 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAC885775016A8F3B10777A9 /* HomeView.swift */; };
+		C5E555CB324AF3626CBA3CC4 /* ControlPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2A13DF416EAA5550E4B9B5 /* ControlPanel.swift */; };
 		CA6494EF800EB1350E56C13C /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D539CEB7F07BFF5B2B29957F /* CoreMedia.framework */; };
-		CC3AB53D24F17F34AA5944E8 /* VideoToolboxSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 885AA4E1BE23EF282ADA9A82 /* VideoToolboxSupport.swift */; };
+		CAF2E4D9EA5CAC791ED6083B /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A6FE7286F91718F95A5CCCC /* DeviceIdentity.swift */; };
 		CC952B7F06552354944A123B /* VideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */; };
-		DD29D44A19F9E695BDD57EA1 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF9661F908556707DC9FB7DA /* Transport.swift */; };
-		E2688422D4E5A997409E2EEA /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01720D03C7CA7E60745AB157 /* Wire.swift */; };
-		E7A61AEDA28D73610C5F7327 /* SignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26D7AD021FDF587734704474 /* SignalingClient.swift */; };
-		F1122EE8F853FC31C35F7E52 /* GestureEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E48D1AB817D8C9F005031D29 /* GestureEngine.swift */; };
-		F94042775CA0A43EF49B4B01 /* InputFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78623DAFE4918F0D7649B053 /* InputFrame.swift */; };
+		CDAEA4CBC1DCAC7966C4E7CE /* SignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81A7231A28CACD19B2B07EA3 /* SignalingClient.swift */; };
+		D11EF45EFDF42856971FFDED /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E46CA59471BFCC182B6E585 /* Log.swift */; };
+		D239AE3F0F3A0BF91CCEF496 /* HotkeyPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F6A6CE4D852549F38BA3EE /* HotkeyPreset.swift */; };
+		D2C1093AC0AA4831161E2876 /* InstanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A42FA2678160C8AD7D487DEB /* InstanceStore.swift */; };
+		D6F94FBAE61EE9875B0D643F /* VideoCodecSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 580217B55280168037D2AA74 /* VideoCodecSupport.swift */; };
+		F0BD0CCC7C326DC8BFAC2EA9 /* DevHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D6E942ABA123D269E42D850 /* DevHooks.swift */; };
+		F1F799E6F5F6A57073B93F7C /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF1D0543280564DF88F37F7 /* AppModel.swift */; };
+		F5CDA0E071D1042D1403D7A0 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 105F63AB862A0B200C7FD861 /* Transport.swift */; };
+		F961603FC6EEE153C43A0421 /* InputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5EF3F2F0EDCB37586E5043D /* InputController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,51 +73,65 @@
 
 /* Begin PBXFileReference section */
 		0079A854CBD34627A1489F33 /* Waystone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Waystone.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		01720D03C7CA7E60745AB157 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
+		01480BA7FFF0DC63C731FA4C /* TrackpadEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackpadEngineTests.swift; sourceTree = "<group>"; };
+		023CC388C8EA33B655FDB57D /* waystone_rtc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = waystone_rtc.h; sourceTree = "<group>"; };
 		08CD5B113F570CE1844E64F0 /* VisionKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VisionKit.framework; path = System/Library/Frameworks/VisionKit.framework; sourceTree = SDKROOT; };
 		0BF6CD7E43F4EE87770D7FC3 /* WaystoneRTC.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = WaystoneRTC.xcframework; path = Vendor/WaystoneRTC.xcframework; sourceTree = "<group>"; };
-		26D7AD021FDF587734704474 /* SignalingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingClient.swift; sourceTree = "<group>"; };
-		2A11AD4E8984BD1A80AFD40D /* PairingScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScannerView.swift; sourceTree = "<group>"; };
+		105F63AB862A0B200C7FD861 /* Transport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transport.swift; sourceTree = "<group>"; };
+		16E070A0BB46FB149F22477D /* PoolConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoolConnection.swift; sourceTree = "<group>"; };
+		1C56B8FF99A8DAF1853BD521 /* FloatingBall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingBall.swift; sourceTree = "<group>"; };
+		1D6E942ABA123D269E42D850 /* DevHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevHooks.swift; sourceTree = "<group>"; };
+		2483AF36FD46912DEC4EC8CF /* PairingLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingLink.swift; sourceTree = "<group>"; };
+		27E2B3899B88A9A4A76CDE2B /* DirectTouchEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectTouchEngineTests.swift; sourceTree = "<group>"; };
+		2B2A13DF416EAA5550E4B9B5 /* ControlPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlPanel.swift; sourceTree = "<group>"; };
+		2D69B10C47EAB3C62FD12BE8 /* WaystoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaystoneApp.swift; sourceTree = "<group>"; };
 		2E5979C80B232599CEFE878D /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		32E402DEC00ED797D6FA192F /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
+		32F6A6CE4D852549F38BA3EE /* HotkeyPreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyPreset.swift; sourceTree = "<group>"; };
+		3AC361AB577CE9A7F7E71980 /* TrackpadEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackpadEngine.swift; sourceTree = "<group>"; };
 		3E02E0883D140621A66983AB /* VideoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
-		4583C6B5ADB11664862E643B /* Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Bridging-Header.h"; sourceTree = "<group>"; };
-		611D3057E739D15AD3DF7216 /* WaystoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaystoneApp.swift; sourceTree = "<group>"; };
-		63D60F03A8CC4166E5AABC3F /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		3FE8259764A599AF19089B51 /* Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Bridging-Header.h"; sourceTree = "<group>"; };
+		4E028B56CD56E2CBD8C03FE5 /* PictureGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureGeometryTests.swift; sourceTree = "<group>"; };
+		4E45E2AA276B2DBA758BC86E /* StreamView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamView.swift; sourceTree = "<group>"; };
+		51EC37FF9E52251C21DF6B40 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
+		580217B55280168037D2AA74 /* VideoCodecSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoCodecSupport.swift; sourceTree = "<group>"; };
+		5A99DFB2DFECC5B0CD785762 /* DirectTouchEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectTouchEngine.swift; sourceTree = "<group>"; };
+		5DDAA958F1396D323E200E5B /* Haptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Haptics.swift; sourceTree = "<group>"; };
 		6932C79015F68C0F8A0B56D3 /* VideoDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoderTests.swift; sourceTree = "<group>"; };
-		78623DAFE4918F0D7649B053 /* InputFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputFrame.swift; sourceTree = "<group>"; };
+		6B0BC552508B02632A2C903C /* PairingSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingSheet.swift; sourceTree = "<group>"; };
 		78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoder.swift; sourceTree = "<group>"; };
+		7950869B76B7DD6DB484E261 /* HotkeyLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyLayer.swift; sourceTree = "<group>"; };
+		7A6FE7286F91718F95A5CCCC /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
+		81A7231A28CACD19B2B07EA3 /* SignalingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingClient.swift; sourceTree = "<group>"; };
 		81BEB2CFB7A6F8B1A14F6E3F /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		8510C078706589B0045E4824 /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
-		885AA4E1BE23EF282ADA9A82 /* VideoToolboxSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoToolboxSupport.swift; sourceTree = "<group>"; };
-		8E4105B45FF72EFEB73C7661 /* waystone_rtc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = waystone_rtc.h; sourceTree = "<group>"; };
-		8F21B9139DEDD50E250A9F63 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
-		913A0F9829904037060DC9F3 /* StreamView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamView.swift; sourceTree = "<group>"; };
+		95F8759E6A4FDC5A7F3FB7D2 /* PictureGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureGeometry.swift; sourceTree = "<group>"; };
+		961FC20ED255BC9F320227EC /* Instance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instance.swift; sourceTree = "<group>"; };
 		99C037B3207B7DEB64D65382 /* WaystoneTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WaystoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		9B533B8F58AECA3B8B2BA405 /* SessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionController.swift; sourceTree = "<group>"; };
-		9EF202BE216B6FED109B3C71 /* InstanceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceStore.swift; sourceTree = "<group>"; };
-		A4CE6C231262FABCCEB2A3F0 /* GestureEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureEngineTests.swift; sourceTree = "<group>"; };
+		9A90F771EF464DDA5DFA1CD9 /* TouchEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchEngine.swift; sourceTree = "<group>"; };
+		9E46CA59471BFCC182B6E585 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
+		A3229F2C658B7F075492AE91 /* SoftKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftKeyboard.swift; sourceTree = "<group>"; };
+		A345A03C9EABFF863839611D /* MediaPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPipeline.swift; sourceTree = "<group>"; };
+		A42FA2678160C8AD7D487DEB /* InstanceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceStore.swift; sourceTree = "<group>"; };
+		AC4FA4EE62A598DDF0666035 /* StreamPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamPreferences.swift; sourceTree = "<group>"; };
+		B0B864A532D97C959E9FC1F2 /* StreamSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamSession.swift; sourceTree = "<group>"; };
 		BAA1671634288EC6383A1962 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
+		C2CDB5A78ACDCDFF71780765 /* ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolTests.swift; sourceTree = "<group>"; };
 		C38803269209AC9370049BDA /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
-		C82C4200C6C99179C5FC501B /* Instance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Instance.swift; sourceTree = "<group>"; };
+		C5EF3F2F0EDCB37586E5043D /* InputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputController.swift; sourceTree = "<group>"; };
+		D107803C2FF6C9E1EEB797FA /* StreamSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamSurface.swift; sourceTree = "<group>"; };
 		D539CEB7F07BFF5B2B29957F /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
 		DB469B485A709EBC801B53BB /* h264-keyframe.h264 */ = {isa = PBXFileReference; path = "h264-keyframe.h264"; sourceTree = "<group>"; };
-		DF9661F908556707DC9FB7DA /* Transport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transport.swift; sourceTree = "<group>"; };
-		E48D1AB817D8C9F005031D29 /* GestureEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureEngine.swift; sourceTree = "<group>"; };
+		DE90ED51D0C7787D1C882B80 /* InputEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputEvent.swift; sourceTree = "<group>"; };
 		E5BDCB3E95F40559531F8238 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
+		EAC885775016A8F3B10777A9 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		F8AD70C2C98197E8932A4B6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		FB9FA068DC3B05F8E48227DB /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		FE163B66FEDE00BBDF751331 /* InputControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputControllerTests.swift; sourceTree = "<group>"; };
+		FEF1D0543280564DF88F37F7 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		3047C4E82913A25CDBCA56CF /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A630B251907E4F35B37123FF /* WaystoneRTC.xcframework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		B88D3E48F0AB418BE1808E76 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -125,16 +152,42 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		05F5E172042144727F95DEF2 /* Input */ = {
+			isa = PBXGroup;
+			children = (
+				5A99DFB2DFECC5B0CD785762 /* DirectTouchEngine.swift */,
+				32F6A6CE4D852549F38BA3EE /* HotkeyPreset.swift */,
+				C5EF3F2F0EDCB37586E5043D /* InputController.swift */,
+				95F8759E6A4FDC5A7F3FB7D2 /* PictureGeometry.swift */,
+				9A90F771EF464DDA5DFA1CD9 /* TouchEngine.swift */,
+				3AC361AB577CE9A7F7E71980 /* TrackpadEngine.swift */,
+			);
+			path = Input;
+			sourceTree = "<group>";
+		};
+		135FA4EBF5BF335708293A13 /* Pool */ = {
+			isa = PBXGroup;
+			children = (
+				7A6FE7286F91718F95A5CCCC /* DeviceIdentity.swift */,
+				961FC20ED255BC9F320227EC /* Instance.swift */,
+				A42FA2678160C8AD7D487DEB /* InstanceStore.swift */,
+				16E070A0BB46FB149F22477D /* PoolConnection.swift */,
+				81A7231A28CACD19B2B07EA3 /* SignalingClient.swift */,
+			);
+			path = Pool;
+			sourceTree = "<group>";
+		};
 		192F0C021067E498644CC823 /* Waystone */ = {
 			isa = PBXGroup;
 			children = (
+				6D5EDE0F39F3C0BD689DDE86 /* App */,
+				05F5E172042144727F95DEF2 /* Input */,
 				54A3A0D3A135D01D0FB71EE9 /* Media */,
-				CAE1859253CA1F9B7FFE2F3C /* Models */,
-				244F25FE049224B3F8EC5D77 /* Net */,
-				8BB8D219F6CBE0E023B2B5FA /* Transport */,
+				135FA4EBF5BF335708293A13 /* Pool */,
+				36BC002F272B54B41EE2F588 /* Protocol */,
+				F661D047038B0CDB2C153F3B /* Stream */,
 				9610BE6B6BCCEB24B22177E8 /* UI */,
 				F8AD70C2C98197E8932A4B6D /* Info.plist */,
-				611D3057E739D15AD3DF7216 /* WaystoneApp.swift */,
 			);
 			path = Waystone;
 			sourceTree = "<group>";
@@ -149,20 +202,30 @@
 			);
 			sourceTree = "<group>";
 		};
-		244F25FE049224B3F8EC5D77 /* Net */ = {
+		36BC002F272B54B41EE2F588 /* Protocol */ = {
 			isa = PBXGroup;
 			children = (
-				26D7AD021FDF587734704474 /* SignalingClient.swift */,
+				DE90ED51D0C7787D1C882B80 /* InputEvent.swift */,
+				2483AF36FD46912DEC4EC8CF /* PairingLink.swift */,
+				51EC37FF9E52251C21DF6B40 /* Wire.swift */,
 			);
-			path = Net;
+			path = Protocol;
+			sourceTree = "<group>";
+		};
+		3BB11FF17BFE965DC4858E12 /* Pairing */ = {
+			isa = PBXGroup;
+			children = (
+				6B0BC552508B02632A2C903C /* PairingSheet.swift */,
+			);
+			path = Pairing;
 			sourceTree = "<group>";
 		};
 		54A3A0D3A135D01D0FB71EE9 /* Media */ = {
 			isa = PBXGroup;
 			children = (
 				E5BDCB3E95F40559531F8238 /* AudioPlayer.swift */,
+				580217B55280168037D2AA74 /* VideoCodecSupport.swift */,
 				78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */,
-				885AA4E1BE23EF282ADA9A82 /* VideoToolboxSupport.swift */,
 				3E02E0883D140621A66983AB /* VideoView.swift */,
 			);
 			path = Media;
@@ -172,10 +235,25 @@
 			isa = PBXGroup;
 			children = (
 				7A92944C28DBA896EFA7C1B5 /* Fixtures */,
-				A4CE6C231262FABCCEB2A3F0 /* GestureEngineTests.swift */,
+				27E2B3899B88A9A4A76CDE2B /* DirectTouchEngineTests.swift */,
+				FE163B66FEDE00BBDF751331 /* InputControllerTests.swift */,
+				4E028B56CD56E2CBD8C03FE5 /* PictureGeometryTests.swift */,
+				C2CDB5A78ACDCDFF71780765 /* ProtocolTests.swift */,
+				01480BA7FFF0DC63C731FA4C /* TrackpadEngineTests.swift */,
 				6932C79015F68C0F8A0B56D3 /* VideoDecoderTests.swift */,
 			);
 			path = WaystoneTests;
+			sourceTree = "<group>";
+		};
+		6D5EDE0F39F3C0BD689DDE86 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				FEF1D0543280564DF88F37F7 /* AppModel.swift */,
+				1D6E942ABA123D269E42D850 /* DevHooks.swift */,
+				9E46CA59471BFCC182B6E585 /* Log.swift */,
+				2D69B10C47EAB3C62FD12BE8 /* WaystoneApp.swift */,
+			);
+			path = App;
 			sourceTree = "<group>";
 		};
 		7A92944C28DBA896EFA7C1B5 /* Fixtures */ = {
@@ -186,38 +264,36 @@
 			path = Fixtures;
 			sourceTree = "<group>";
 		};
-		8BB8D219F6CBE0E023B2B5FA /* Transport */ = {
-			isa = PBXGroup;
-			children = (
-				4583C6B5ADB11664862E643B /* Bridging-Header.h */,
-				DF9661F908556707DC9FB7DA /* Transport.swift */,
-				8E4105B45FF72EFEB73C7661 /* waystone_rtc.h */,
-			);
-			path = Transport;
-			sourceTree = "<group>";
-		};
 		9610BE6B6BCCEB24B22177E8 /* UI */ = {
 			isa = PBXGroup;
 			children = (
-				63D60F03A8CC4166E5AABC3F /* HomeView.swift */,
-				2A11AD4E8984BD1A80AFD40D /* PairingScannerView.swift */,
-				9B533B8F58AECA3B8B2BA405 /* SessionController.swift */,
-				913A0F9829904037060DC9F3 /* StreamView.swift */,
+				9CA45B80F6828A6E03D32056 /* Home */,
+				3BB11FF17BFE965DC4858E12 /* Pairing */,
+				E3C7758C8E4873ACB20BD7EB /* Shared */,
+				AD8997D27C3A1955DED32B64 /* Stream */,
 			);
 			path = UI;
 			sourceTree = "<group>";
 		};
-		CAE1859253CA1F9B7FFE2F3C /* Models */ = {
+		9CA45B80F6828A6E03D32056 /* Home */ = {
 			isa = PBXGroup;
 			children = (
-				8F21B9139DEDD50E250A9F63 /* DeviceIdentity.swift */,
-				E48D1AB817D8C9F005031D29 /* GestureEngine.swift */,
-				78623DAFE4918F0D7649B053 /* InputFrame.swift */,
-				C82C4200C6C99179C5FC501B /* Instance.swift */,
-				9EF202BE216B6FED109B3C71 /* InstanceStore.swift */,
-				01720D03C7CA7E60745AB157 /* Wire.swift */,
+				EAC885775016A8F3B10777A9 /* HomeView.swift */,
 			);
-			path = Models;
+			path = Home;
+			sourceTree = "<group>";
+		};
+		AD8997D27C3A1955DED32B64 /* Stream */ = {
+			isa = PBXGroup;
+			children = (
+				2B2A13DF416EAA5550E4B9B5 /* ControlPanel.swift */,
+				1C56B8FF99A8DAF1853BD521 /* FloatingBall.swift */,
+				7950869B76B7DD6DB484E261 /* HotkeyLayer.swift */,
+				A3229F2C658B7F075492AE91 /* SoftKeyboard.swift */,
+				D107803C2FF6C9E1EEB797FA /* StreamSurface.swift */,
+				4E45E2AA276B2DBA758BC86E /* StreamView.swift */,
+			);
+			path = Stream;
 			sourceTree = "<group>";
 		};
 		D572F96CDDCBF7C8510C7489 /* Frameworks */ = {
@@ -246,6 +322,27 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		E3C7758C8E4873ACB20BD7EB /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				5DDAA958F1396D323E200E5B /* Haptics.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		F661D047038B0CDB2C153F3B /* Stream */ = {
+			isa = PBXGroup;
+			children = (
+				3FE8259764A599AF19089B51 /* Bridging-Header.h */,
+				A345A03C9EABFF863839611D /* MediaPipeline.swift */,
+				AC4FA4EE62A598DDF0666035 /* StreamPreferences.swift */,
+				B0B864A532D97C959E9FC1F2 /* StreamSession.swift */,
+				105F63AB862A0B200C7FD861 /* Transport.swift */,
+				023CC388C8EA33B655FDB57D /* waystone_rtc.h */,
+			);
+			path = Stream;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -255,7 +352,6 @@
 			buildPhases = (
 				B53D59AF1877FF3EF0857629 /* Sources */,
 				67DF5CEECEDBCE7578212A09 /* Resources */,
-				3047C4E82913A25CDBCA56CF /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -342,23 +438,41 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F1F799E6F5F6A57073B93F7C /* AppModel.swift in Sources */,
 				7C2BC1AAF294AC7824139D0E /* AudioPlayer.swift in Sources */,
-				5CC87D8D57555B869F57AF75 /* DeviceIdentity.swift in Sources */,
-				F1122EE8F853FC31C35F7E52 /* GestureEngine.swift in Sources */,
-				371C5178FA3114DCF1483383 /* HomeView.swift in Sources */,
-				C097A78E5302A57C24FEE140 /* InputFrame.swift in Sources */,
-				7C7A163FA7A18D0619FCFA68 /* Instance.swift in Sources */,
-				423D0BFE25D1ADFD71E9B2AE /* InstanceStore.swift in Sources */,
-				6FD8EDB8FF7DCA429C73EBD0 /* PairingScannerView.swift in Sources */,
-				243A4E649EDE99B1A81EE1D3 /* SessionController.swift in Sources */,
-				E7A61AEDA28D73610C5F7327 /* SignalingClient.swift in Sources */,
-				476A71392AE86D65CA70F37D /* StreamView.swift in Sources */,
-				DD29D44A19F9E695BDD57EA1 /* Transport.swift in Sources */,
+				C5E555CB324AF3626CBA3CC4 /* ControlPanel.swift in Sources */,
+				F0BD0CCC7C326DC8BFAC2EA9 /* DevHooks.swift in Sources */,
+				CAF2E4D9EA5CAC791ED6083B /* DeviceIdentity.swift in Sources */,
+				0848653850C7CBB24B881554 /* DirectTouchEngine.swift in Sources */,
+				9910E0D92BEEC722A517D24D /* FloatingBall.swift in Sources */,
+				17338250B0B885515C6D828C /* Haptics.swift in Sources */,
+				B07B639726AB19B588666CB1 /* HomeView.swift in Sources */,
+				214CE0CEFBD6365DC1C15D2D /* HotkeyLayer.swift in Sources */,
+				D239AE3F0F3A0BF91CCEF496 /* HotkeyPreset.swift in Sources */,
+				F961603FC6EEE153C43A0421 /* InputController.swift in Sources */,
+				A8E518984C997FA35F3CCDFA /* InputEvent.swift in Sources */,
+				4DE68E2E0C3B3BB6657B5E91 /* Instance.swift in Sources */,
+				D2C1093AC0AA4831161E2876 /* InstanceStore.swift in Sources */,
+				D11EF45EFDF42856971FFDED /* Log.swift in Sources */,
+				152431C72B4E4847A1692CD7 /* MediaPipeline.swift in Sources */,
+				4DB08C6CFF46849B01DD2F99 /* PairingLink.swift in Sources */,
+				9EBBD171F3A62CFE65A3075E /* PairingSheet.swift in Sources */,
+				A7AA30B8FFB496F48525B33C /* PictureGeometry.swift in Sources */,
+				48FABB14B6DAD2A72F46B442 /* PoolConnection.swift in Sources */,
+				CDAEA4CBC1DCAC7966C4E7CE /* SignalingClient.swift in Sources */,
+				335F104E52EDF07B141F3B80 /* SoftKeyboard.swift in Sources */,
+				053856FA8C5556A5EF1449B6 /* StreamPreferences.swift in Sources */,
+				077F44B07D9AC067E6474CB1 /* StreamSession.swift in Sources */,
+				1C8974CB687579CCFA0E5B78 /* StreamSurface.swift in Sources */,
+				66A52B809954A454D686A7D4 /* StreamView.swift in Sources */,
+				8E650F62D7088D03522696A6 /* TouchEngine.swift in Sources */,
+				796FD7D33889BE0CC0A7045D /* TrackpadEngine.swift in Sources */,
+				F5CDA0E071D1042D1403D7A0 /* Transport.swift in Sources */,
+				D6F94FBAE61EE9875B0D643F /* VideoCodecSupport.swift in Sources */,
 				CC952B7F06552354944A123B /* VideoDecoder.swift in Sources */,
-				CC3AB53D24F17F34AA5944E8 /* VideoToolboxSupport.swift in Sources */,
 				9A1356972D844EBE3BB679C8 /* VideoView.swift in Sources */,
-				C227E82BFF798DE26B1C12A9 /* WaystoneApp.swift in Sources */,
-				E2688422D4E5A997409E2EEA /* Wire.swift in Sources */,
+				78FC99A56D437F2FC9FBB1F3 /* WaystoneApp.swift in Sources */,
+				299BCB36702E76278ECDA611 /* Wire.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -366,16 +480,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6681179AF3DB0BD218248F33 /* DeviceIdentity.swift in Sources */,
-				523F17B38B42538EC569C238 /* GestureEngine.swift in Sources */,
-				40333D6C72A36045ED036C6C /* GestureEngineTests.swift in Sources */,
-				F94042775CA0A43EF49B4B01 /* InputFrame.swift in Sources */,
-				27402B22712707EBA14E7694 /* Instance.swift in Sources */,
-				22C32E2C73B6496305A2F8C3 /* InstanceStore.swift in Sources */,
-				18BB31479C61927EBCD1A1C6 /* Transport.swift in Sources */,
-				C2A4ECE9890BDD74765ABC42 /* VideoDecoder.swift in Sources */,
+				905D7838A89DA5B6EB2335EF /* DirectTouchEngineTests.swift in Sources */,
+				0BCA93AB0FC8DEC429F54CA1 /* InputControllerTests.swift in Sources */,
+				4C23B8268840E8E149300D9E /* PictureGeometryTests.swift in Sources */,
+				310E42A4596C2EC01D84E26A /* ProtocolTests.swift in Sources */,
+				3444EC9046FC6C57F6287868 /* TrackpadEngineTests.swift in Sources */,
 				6120FEE06D681B3F91A7FC14 /* VideoDecoderTests.swift in Sources */,
-				5114A047D9B58A2C5309E4B6 /* Wire.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -394,15 +504,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"\"Vendor\"",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Vendor/include",
-				);
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -411,7 +513,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.waystone.app.tests;
 				SDKROOT = iphoneos;
-				SWIFT_OBJC_BRIDGING_HEADER = "Waystone/Transport/Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Waystone.app/Waystone";
 			};
@@ -546,15 +647,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"\"Vendor\"",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(SRCROOT)/Vendor/include",
-				);
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -563,7 +656,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.waystone.app.tests;
 				SDKROOT = iphoneos;
-				SWIFT_OBJC_BRIDGING_HEADER = "Waystone/Transport/Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Waystone.app/Waystone";
 			};
@@ -591,7 +683,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.waystone.app;
 				SDKROOT = iphoneos;
-				SWIFT_OBJC_BRIDGING_HEADER = "Waystone/Transport/Bridging-Header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "Waystone/Stream/Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -618,7 +710,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.waystone.app;
 				SDKROOT = iphoneos;
-				SWIFT_OBJC_BRIDGING_HEADER = "Waystone/Transport/Bridging-Header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "Waystone/Stream/Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;

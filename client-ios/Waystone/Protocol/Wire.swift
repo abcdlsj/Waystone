@@ -1,326 +1,354 @@
 import Foundation
 
-/// Wire protocol mirror of `crates/waystone-proto`.
+/// Swift mirror of `crates/waystone-proto/src/signal.rs`.
 ///
-/// The Rust side uses serde with an internally tagged enum (`type`), so decoding
-/// here goes through `JSONSerialization`: the schema is small and explicit, and a
-/// mismatch fails loudly in one place instead of in a pile of `Codable` errors.
+/// Every message is one JSON object tagged by `type`, exactly as serde writes
+/// it. Every multi-word field spells its snake_case wire name in `CodingKeys`,
+/// so a mismatch with the Rust side fails in one decoder instead of turning
+/// into silently missing data.
 enum Wire {
+    static let protocolVersion: UInt32 = 1
 
-    // MARK: - Shared
+    // MARK: - Shared values
 
-    struct Viewport {
+    enum Role: String, Codable {
+        case host
+        case controller
+    }
+
+    enum Platform: String, Codable {
+        case windows, macos, linux, ios, ipados, android, other
+
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Platform(rawValue: raw) ?? .other
+        }
+    }
+
+    enum VideoCodec: String, Codable {
+        case h264
+        case h265
+    }
+
+    struct Viewport: Codable, Equatable {
         var width: UInt32
         var height: UInt32
         var dpi: UInt16
         var fps: UInt32
-
-        static func current(screen: CGRect, scale: CGFloat, fps: UInt32) -> Viewport {
-            Viewport(
-                width: UInt32((screen.width * scale).rounded()),
-                height: UInt32((screen.height * scale).rounded()),
-                dpi: 460,
-                fps: fps
-            )
-        }
     }
 
-    struct DeviceInfo {
+    struct DeviceInfo: Codable, Equatable {
         var id: String
         var name: String
-        var platform: String
-        var role: String
+        var platform: Platform
+        var role: Role
         var publicKey: String
 
-        var json: [String: Any] {
-            [
-                "id": id,
-                "name": name,
-                "platform": platform,
-                "role": role,
-                "public_key": publicKey,
-            ]
-        }
-
-        init(id: String, name: String, platform: String, role: String, publicKey: String) {
-            self.id = id
-            self.name = name
-            self.platform = platform
-            self.role = role
-            self.publicKey = publicKey
-        }
-
-        init?(json: [String: Any]) {
-            guard let id = json["id"] as? String,
-                let name = json["name"] as? String,
-                let platform = json["platform"] as? String,
-                let role = json["role"] as? String,
-                let publicKey = json["public_key"] as? String
-            else { return nil }
-            self.init(id: id, name: name, platform: platform, role: role, publicKey: publicKey)
+        private enum CodingKeys: String, CodingKey {
+            case id, name, platform, role
+            case publicKey = "public_key"
         }
     }
 
-    struct TurnCredentials {
+    struct Identity: Codable {
+        var id: String
+        var publicKey: String
+
+        private enum CodingKeys: String, CodingKey {
+            case id
+            case publicKey = "public_key"
+        }
+    }
+
+    struct TurnCredentials: Codable, Equatable {
         var server: String
         var username: String
         var password: String
+        var relayBitrateCeiling: UInt32?
 
-        init?(json: Any?) {
-            guard let json = json as? [String: Any],
-                let server = json["server"] as? String,
-                let username = json["username"] as? String,
-                let password = json["password"] as? String
-            else { return nil }
-            self.server = server
-            self.username = username
-            self.password = password
+        private enum CodingKeys: String, CodingKey {
+            case server, username, password
+            case relayBitrateCeiling = "relay_bitrate_ceiling"
         }
     }
 
-    struct PeerState {
+    struct PeerState: Codable, Equatable {
         var device: DeviceInfo
         var online: Bool
         var rttMs: UInt32?
-    }
+        var busy: Bool
 
-    struct Challenge {
-        var nonce: String
-        var serverId: String
+        private enum CodingKeys: String, CodingKey {
+            case device, online, busy
+            case rttMs = "rtt_ms"
+        }
 
-        /// Must match `waystone_proto::identity::Challenge::signing_payload`.
-        func signingPayload() -> Data {
-            Data("waystone-auth-v1|\(serverId)|\(nonce)".utf8)
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            device = try container.decode(DeviceInfo.self, forKey: .device)
+            online = try container.decode(Bool.self, forKey: .online)
+            rttMs = try container.decodeIfPresent(UInt32.self, forKey: .rttMs)
+            busy = try container.decodeIfPresent(Bool.self, forKey: .busy) ?? false
+        }
+
+        init(device: DeviceInfo, online: Bool, rttMs: UInt32? = nil, busy: Bool = false) {
+            self.device = device
+            self.online = online
+            self.rttMs = rttMs
+            self.busy = busy
         }
     }
 
-    // MARK: - Server to client
+    enum ByeReason: String, Codable {
+        case userHangup = "user_hangup"
+        case lockAndExit = "lock_and_exit"
+        case networkTimeout = "network_timeout"
+        case peerOffline = "peer_offline"
+        case hostError = "host_error"
+        /// A reason added by a newer server.
+        case unknown
 
-    enum ServerMessage {
-        case challenge(nonce: String, serverId: String, protocolVersion: UInt32)
-        case pairAccepted(serverId: String)
-        case pairRejected(reason: String)
-        case authOk(peers: [PeerState], turn: TurnCredentials?)
-        case authRejected(reason: String)
-        case peerUpdate(peers: [PeerState])
-        case sessionAccepted(sessionId: String, isHost: Bool, peer: DeviceInfo, audio: Bool)
-        case sessionRejected(reason: String)
-        case rtcSignal(sessionId: String, signal: RtcSignal)
-        case sessionControl(sessionId: String, control: SessionControl)
-        case sessionEnded(sessionId: String, reason: String, detail: String?)
-        case pong(nonce: UInt64)
-        case error(message: String)
-
-        static func decode(_ text: String) -> ServerMessage? {
-            guard let data = text.data(using: .utf8),
-                let object = try? JSONSerialization.jsonObject(with: data),
-                let json = object as? [String: Any],
-                let type = json["type"] as? String
-            else { return nil }
-
-            switch type {
-            case "challenge":
-                guard let nonce = json["nonce"] as? String,
-                    let serverId = json["server_id"] as? String
-                else { return nil }
-                return .challenge(
-                    nonce: nonce,
-                    serverId: serverId,
-                    protocolVersion: (json["protocol_version"] as? NSNumber)?.uint32Value ?? 0)
-            case "pair_accepted":
-                return .pairAccepted(serverId: json["server_id"] as? String ?? "")
-            case "pair_rejected":
-                return .pairRejected(reason: json["reason"] as? String ?? "")
-            case "auth_ok":
-                return .authOk(
-                    peers: decodePeers(json["peers"]),
-                    turn: TurnCredentials(json: json["turn"]))
-            case "auth_rejected":
-                return .authRejected(reason: json["reason"] as? String ?? "")
-            case "peer_update":
-                return .peerUpdate(peers: decodePeers(json["peers"]))
-            case "session_accepted":
-                guard let sessionId = json["session_id"] as? String,
-                    let peerJson = json["peer"] as? [String: Any],
-                    let peer = DeviceInfo(json: peerJson)
-                else { return nil }
-                return .sessionAccepted(
-                    sessionId: sessionId,
-                    isHost: json["is_host"] as? Bool ?? false,
-                    peer: peer,
-                    audio: json["audio"] as? Bool ?? true)
-            case "session_rejected":
-                return .sessionRejected(reason: json["reason"] as? String ?? "")
-            case "rtc_signal":
-                guard let sessionId = json["session_id"] as? String,
-                    let signalJson = json["signal"] as? [String: Any],
-                    let signal = RtcSignal(json: signalJson)
-                else { return nil }
-                return .rtcSignal(sessionId: sessionId, signal: signal)
-            case "session_control":
-                guard let sessionId = json["session_id"] as? String,
-                    let controlJson = json["control"] as? [String: Any],
-                    let control = SessionControl(json: controlJson)
-                else { return nil }
-                return .sessionControl(sessionId: sessionId, control: control)
-            case "session_ended":
-                guard let sessionId = json["session_id"] as? String else { return nil }
-                return .sessionEnded(
-                    sessionId: sessionId,
-                    reason: json["reason"] as? String ?? "network_timeout",
-                    detail: json["detail"] as? String)
-            case "pong":
-                return .pong(nonce: (json["nonce"] as? NSNumber)?.uint64Value ?? 0)
-            case "error":
-                return .error(message: json["message"] as? String ?? "")
-            default:
-                return nil
-            }
-        }
-
-        private static func decodePeers(_ value: Any?) -> [PeerState] {
-            guard let list = value as? [[String: Any]] else { return [] }
-            return list.compactMap { entry in
-                guard let deviceJson = entry["device"] as? [String: Any],
-                    let device = DeviceInfo(json: deviceJson)
-                else { return nil }
-                return PeerState(
-                    device: device,
-                    online: entry["online"] as? Bool ?? false,
-                    rttMs: (entry["rtt_ms"] as? NSNumber)?.uint32Value)
-            }
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = ByeReason(rawValue: raw) ?? .unknown
         }
     }
 
-    enum RtcSignal {
+    /// Must match `waystone_proto::identity::Challenge::signing_payload`.
+    static func signingPayload(serverId: String, nonce: String) -> Data {
+        Data("waystone-auth-v1|\(serverId)|\(nonce)".utf8)
+    }
+
+    // MARK: - Session payloads
+
+    enum RtcSignal: Codable, Equatable {
         case offer(sdp: String)
         case answer(sdp: String)
         case ice(candidate: String)
         case iceComplete
 
-        init?(json: [String: Any]) {
-            switch json["kind"] as? String {
-            case "offer":
-                guard let sdp = json["sdp"] as? String else { return nil }
-                self = .offer(sdp: sdp)
-            case "answer":
-                guard let sdp = json["sdp"] as? String else { return nil }
-                self = .answer(sdp: sdp)
-            case "ice":
-                guard let candidate = json["candidate"] as? String else { return nil }
-                self = .ice(candidate: candidate)
-            case "ice_complete":
-                self = .iceComplete
-            default:
-                return nil
+        private enum Keys: String, CodingKey {
+            case kind, sdp, candidate
+            case sdpMid = "sdp_mid"
+            case sdpMlineIndex = "sdp_mline_index"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            switch try c.decode(String.self, forKey: .kind) {
+            case "offer": self = .offer(sdp: try c.decode(String.self, forKey: .sdp))
+            case "answer": self = .answer(sdp: try c.decode(String.self, forKey: .sdp))
+            case "ice": self = .ice(candidate: try c.decode(String.self, forKey: .candidate))
+            case "ice_complete": self = .iceComplete
+            case let other:
+                throw DecodingError.dataCorruptedError(
+                    forKey: .kind, in: c, debugDescription: "unknown rtc signal \(other)")
             }
         }
 
-        var json: [String: Any] {
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: Keys.self)
             switch self {
-            case .offer(let sdp): return ["kind": "offer", "sdp": sdp]
-            case .answer(let sdp): return ["kind": "answer", "sdp": sdp]
+            case .offer(let sdp):
+                try c.encode("offer", forKey: .kind)
+                try c.encode(sdp, forKey: .sdp)
+            case .answer(let sdp):
+                try c.encode("answer", forKey: .kind)
+                try c.encode(sdp, forKey: .sdp)
             case .ice(let candidate):
-                return ["kind": "ice", "candidate": candidate]
-            case .iceComplete: return ["kind": "ice_complete"]
+                try c.encode("ice", forKey: .kind)
+                try c.encode(candidate, forKey: .candidate)
+                try c.encodeNil(forKey: .sdpMid)
+                try c.encodeNil(forKey: .sdpMlineIndex)
+            case .iceComplete:
+                try c.encode("ice_complete", forKey: .kind)
             }
         }
     }
 
-    enum SessionControl {
+    enum SessionControl: Codable, Equatable {
         case setFrameRate(fps: UInt32)
         case requestKeyframe
-        case setVideoEnabled(enabled: Bool)
-        case setAudioEnabled(enabled: Bool)
+        case setVideoEnabled(Bool)
+        case setAudioEnabled(Bool)
         case selectDisplay(index: UInt32)
 
-        init?(json: [String: Any]) {
-            switch json["kind"] as? String {
-            case "set_frame_rate":
-                self = .setFrameRate(fps: (json["fps"] as? NSNumber)?.uint32Value ?? 60)
-            case "request_keyframe":
-                self = .requestKeyframe
-            case "set_video_enabled":
-                self = .setVideoEnabled(enabled: json["enabled"] as? Bool ?? true)
-            case "set_audio_enabled":
-                self = .setAudioEnabled(enabled: json["enabled"] as? Bool ?? true)
-            case "select_display":
-                self = .selectDisplay(index: (json["index"] as? NSNumber)?.uint32Value ?? 0)
-            default:
-                return nil
+        private enum Keys: String, CodingKey { case kind, fps, enabled, index }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            switch try c.decode(String.self, forKey: .kind) {
+            case "set_frame_rate": self = .setFrameRate(fps: try c.decode(UInt32.self, forKey: .fps))
+            case "request_keyframe": self = .requestKeyframe
+            case "set_video_enabled": self = .setVideoEnabled(try c.decode(Bool.self, forKey: .enabled))
+            case "set_audio_enabled": self = .setAudioEnabled(try c.decode(Bool.self, forKey: .enabled))
+            case "select_display": self = .selectDisplay(index: try c.decode(UInt32.self, forKey: .index))
+            case let other:
+                throw DecodingError.dataCorruptedError(
+                    forKey: .kind, in: c, debugDescription: "unknown control \(other)")
             }
         }
 
-        var json: [String: Any] {
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: Keys.self)
             switch self {
-            case .setFrameRate(let fps): return ["kind": "set_frame_rate", "fps": fps]
-            case .requestKeyframe: return ["kind": "request_keyframe"]
+            case .setFrameRate(let fps):
+                try c.encode("set_frame_rate", forKey: .kind)
+                try c.encode(fps, forKey: .fps)
+            case .requestKeyframe:
+                try c.encode("request_keyframe", forKey: .kind)
             case .setVideoEnabled(let enabled):
-                return ["kind": "set_video_enabled", "enabled": enabled]
+                try c.encode("set_video_enabled", forKey: .kind)
+                try c.encode(enabled, forKey: .enabled)
             case .setAudioEnabled(let enabled):
-                return ["kind": "set_audio_enabled", "enabled": enabled]
+                try c.encode("set_audio_enabled", forKey: .kind)
+                try c.encode(enabled, forKey: .enabled)
             case .selectDisplay(let index):
-                return ["kind": "select_display", "index": index]
+                try c.encode("select_display", forKey: .kind)
+                try c.encode(index, forKey: .index)
             }
         }
     }
 
     // MARK: - Client to server
 
-    enum ClientMessage {
+    enum ClientMessage: Encodable {
         case pairRequest(token: String, device: DeviceInfo)
-        case auth(identityId: String, publicKey: String, signature: String, name: String)
-        case sessionStart(target: String, viewport: Viewport, audio: Bool, videoCodec: String)
+        case auth(identity: Identity, signature: String, name: String)
+        case sessionStart(target: String, viewport: Viewport, audio: Bool, videoCodec: VideoCodec)
         case rtcSignal(sessionId: String, signal: RtcSignal)
         case sessionControl(sessionId: String, control: SessionControl)
-        case sessionBye(sessionId: String, reason: String)
-        case ping(nonce: UInt64)
+        case sessionBye(sessionId: String, reason: ByeReason)
 
-        var json: [String: Any] {
+        private enum Keys: String, CodingKey {
+            case type, token, device, identity, signature, name, target, viewport, audio
+            case protocolVersion = "protocol_version"
+            case videoCodec = "video_codec"
+            case sessionId = "session_id"
+            case signal, control, reason
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: Keys.self)
             switch self {
             case .pairRequest(let token, let device):
-                return ["type": "pair_request", "token": token, "device": device.json]
-            case .auth(let identityId, let publicKey, let signature, let name):
-                return [
-                    "type": "auth",
-                    "identity": ["id": identityId, "public_key": publicKey],
-                    "signature": signature,
-                    "protocol_version": 1,
-                    "name": name,
-                ]
-            case .sessionStart(let target, let viewport, let audio, let videoCodec):
-                return [
-                    "type": "session_start",
-                    "target": target,
-                    "viewport": [
-                        "width": viewport.width,
-                        "height": viewport.height,
-                        "dpi": viewport.dpi,
-                        "fps": viewport.fps,
-                    ],
-                    "audio": audio,
-                    // The host encodes, so it has to be told which codec this
-                    // device can decode; the SDP alone cannot express it.
-                    "video_codec": videoCodec,
-                ]
+                try c.encode("pair_request", forKey: .type)
+                try c.encode(token, forKey: .token)
+                try c.encode(device, forKey: .device)
+            case .auth(let identity, let signature, let name):
+                try c.encode("auth", forKey: .type)
+                try c.encode(identity, forKey: .identity)
+                try c.encode(signature, forKey: .signature)
+                try c.encode(Wire.protocolVersion, forKey: .protocolVersion)
+                try c.encode(name, forKey: .name)
+            case .sessionStart(let target, let viewport, let audio, let codec):
+                try c.encode("session_start", forKey: .type)
+                try c.encode(target, forKey: .target)
+                try c.encode(viewport, forKey: .viewport)
+                try c.encode(audio, forKey: .audio)
+                try c.encode(codec, forKey: .videoCodec)
             case .rtcSignal(let sessionId, let signal):
-                return [
-                    "type": "rtc_signal", "session_id": sessionId, "signal": signal.json,
-                ]
+                try c.encode("rtc_signal", forKey: .type)
+                try c.encode(sessionId, forKey: .sessionId)
+                try c.encode(signal, forKey: .signal)
             case .sessionControl(let sessionId, let control):
-                return [
-                    "type": "session_control", "session_id": sessionId, "control": control.json,
-                ]
+                try c.encode("session_control", forKey: .type)
+                try c.encode(sessionId, forKey: .sessionId)
+                try c.encode(control, forKey: .control)
             case .sessionBye(let sessionId, let reason):
-                return ["type": "session_bye", "session_id": sessionId, "reason": reason]
-            case .ping(let nonce):
-                return ["type": "ping", "nonce": nonce]
+                try c.encode("session_bye", forKey: .type)
+                try c.encode(sessionId, forKey: .sessionId)
+                try c.encode(reason, forKey: .reason)
             }
         }
 
-        func encoded() -> String {
-            let data = try? JSONSerialization.data(withJSONObject: json)
-            return data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        func json() -> String {
+            // Encoding a value made of strings and integers cannot fail.
+            let data = try! Wire.encoder.encode(self)
+            return String(decoding: data, as: UTF8.self)
         }
     }
+
+    // MARK: - Server to client
+
+    enum ServerMessage: Decodable {
+        case challenge(nonce: String, serverId: String)
+        case pairAccepted(serverId: String)
+        case pairRejected(reason: String)
+        case authOk(peers: [PeerState], turn: TurnCredentials?)
+        case authRejected(reason: String)
+        case peerUpdate(peers: [PeerState])
+        case sessionAccepted(sessionId: String, peer: DeviceInfo, videoCodec: VideoCodec)
+        case sessionRejected(reason: String)
+        case rtcSignal(sessionId: String, signal: RtcSignal)
+        case sessionControl(sessionId: String, control: SessionControl)
+        case sessionEnded(sessionId: String, reason: ByeReason, detail: String?)
+        case pong
+        case error(message: String)
+
+        private enum Keys: String, CodingKey {
+            case type, nonce, reason, peers, turn, peer, signal, control, detail, message
+            case serverId = "server_id"
+            case sessionId = "session_id"
+            case videoCodec = "video_codec"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            switch try c.decode(String.self, forKey: .type) {
+            case "challenge":
+                self = .challenge(
+                    nonce: try c.decode(String.self, forKey: .nonce),
+                    serverId: try c.decode(String.self, forKey: .serverId))
+            case "pair_accepted":
+                self = .pairAccepted(serverId: try c.decode(String.self, forKey: .serverId))
+            case "pair_rejected":
+                self = .pairRejected(reason: try c.decode(String.self, forKey: .reason))
+            case "auth_ok":
+                self = .authOk(
+                    peers: try c.decode([PeerState].self, forKey: .peers),
+                    turn: try c.decodeIfPresent(TurnCredentials.self, forKey: .turn))
+            case "auth_rejected":
+                self = .authRejected(reason: try c.decode(String.self, forKey: .reason))
+            case "peer_update":
+                self = .peerUpdate(peers: try c.decode([PeerState].self, forKey: .peers))
+            case "session_accepted":
+                self = .sessionAccepted(
+                    sessionId: try c.decode(String.self, forKey: .sessionId),
+                    peer: try c.decode(DeviceInfo.self, forKey: .peer),
+                    videoCodec: try c.decodeIfPresent(VideoCodec.self, forKey: .videoCodec) ?? .h265)
+            case "session_rejected":
+                self = .sessionRejected(reason: try c.decode(String.self, forKey: .reason))
+            case "rtc_signal":
+                self = .rtcSignal(
+                    sessionId: try c.decode(String.self, forKey: .sessionId),
+                    signal: try c.decode(RtcSignal.self, forKey: .signal))
+            case "session_control":
+                self = .sessionControl(
+                    sessionId: try c.decode(String.self, forKey: .sessionId),
+                    control: try c.decode(SessionControl.self, forKey: .control))
+            case "session_ended":
+                self = .sessionEnded(
+                    sessionId: try c.decode(String.self, forKey: .sessionId),
+                    reason: try c.decode(ByeReason.self, forKey: .reason),
+                    detail: try c.decodeIfPresent(String.self, forKey: .detail))
+            case "pong":
+                self = .pong
+            case "error":
+                self = .error(message: try c.decode(String.self, forKey: .message))
+            case let other:
+                throw DecodingError.dataCorruptedError(
+                    forKey: .type, in: c, debugDescription: "unknown message \(other)")
+            }
+        }
+
+        static func decode(_ text: String) throws -> ServerMessage {
+            try Wire.decoder.decode(ServerMessage.self, from: Data(text.utf8))
+        }
+    }
+
+    // MARK: - Coders
+
+    static let encoder = JSONEncoder()
+    static let decoder = JSONDecoder()
 }

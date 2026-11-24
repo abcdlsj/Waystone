@@ -3,13 +3,12 @@ import Foundation
 
 /// Ed25519 device identity, persisted in the keychain.
 ///
-/// The private key never leaves the Secure Enclave backed keychain entry, and the
-/// public key is the only thing the server ever sees. The device id is derived
+/// The private key stays in a this-device-only keychain item, and the public
+/// key is the only thing the server ever sees. The device id is derived
 /// the same way as in `waystone-proto`: `hex(sha256(public_key))[..16]`.
 struct DeviceIdentity {
     let id: String
     let publicKeyBase64: String
-    private let storage: Storage
 
     /// Minimal abstraction so the identity can be created in tests without a
     /// real keychain.
@@ -24,7 +23,6 @@ struct DeviceIdentity {
     }
 
     init(loadOrCreateFor key: String, storage: Storage = KeychainStorage()) throws {
-        self.storage = storage
         let privateKey: Curve25519.Signing.PrivateKey
         if let existing = storage.load(key: key) {
             privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: existing)
@@ -41,20 +39,19 @@ struct DeviceIdentity {
     private let privateKey: Curve25519.Signing.PrivateKey
 
     /// Signs a payload and returns the base64 signature the server expects.
-    func sign(_ payload: Data) -> String {
-        let signature = try? privateKey.signature(for: payload)
-        return signature?.base64EncodedString() ?? ""
+    func sign(_ payload: Data) throws -> String {
+        try privateKey.signature(for: payload).base64EncodedString()
     }
 
-    /// Builds the `DeviceInfo` sent during pairing and authentication.
-    func info(name: String, platform: String) -> Wire.DeviceInfo {
+    var wireIdentity: Wire.Identity {
+        Wire.Identity(id: id, publicKey: publicKeyBase64)
+    }
+
+    /// Builds the `DeviceInfo` sent when pairing. The server decides the role
+    /// from the token; `controller` is only what this app is.
+    func info(name: String, platform: Wire.Platform) -> Wire.DeviceInfo {
         Wire.DeviceInfo(
-            id: id,
-            name: name,
-            platform: platform,
-            role: "controller",
-            publicKey: publicKeyBase64
-        )
+            id: id, name: name, platform: platform, role: .controller, publicKey: publicKeyBase64)
     }
 
     /// Mirrors `waystone_proto::device::DeviceId::from_public_key`.

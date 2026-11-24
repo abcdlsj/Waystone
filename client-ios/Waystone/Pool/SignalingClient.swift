@@ -1,157 +1,110 @@
 import CryptoKit
 import Foundation
 
-/// WSS client for the signaling channel.
+/// One WSS connection to a Waystone server.
 ///
-/// `URLSessionWebSocketTask` is used instead of a third party library so the app
-/// has no networking dependencies. Certificate pinning happens in the session
-/// delegate: the server uses a self-signed certificate whose SHA-256 fingerprint
-/// was carried by the pairing QR code.
+/// The server uses a self-signed certificate, so trust comes from the SHA-256
+/// fingerprint carried by the pairing link instead of a CA chain. A client is
+/// single use: once it reports `closed`, create a new one.
 @MainActor
-final class SignalingClient: NSObject {
-    enum State: Equatable {
-        case idle
-        case connecting
-        case ready
-        case failed(String)
-    }
-
-    /// Events surfaced to the view model.
+final class SignalingClient {
     enum Event {
+        case opened
         case message(Wire.ServerMessage)
-        case stateChanged(State)
-        case closed(String)
+        case closed(reason: String)
     }
 
-    private var session: URLSession!
-    private var task: URLSessionWebSocketTask?
-    private let queue = DispatchQueue(label: "dev.waystone.signaling")
-    private var handler: ((Event) -> Void)?
-    private(set) var state: State = .idle
-    private var fingerprint: String = ""
-    private var pingTimer: Timer?
+    private let task: URLSessionWebSocketTask
+    private let session: URLSession
+    private var onEvent: ((Event) -> Void)?
+    private var closed = false
 
-    override init() {
-        super.init()
-    }
-
-    /// Opens the socket and starts delivering events to `handler`.
-    func connect(instance: Instance, handler: @escaping (Event) -> Void) {
-        disconnect()
-        self.handler = handler
-        self.fingerprint = instance.fingerprint.lowercased()
-
-        let configuration = URLSessionConfiguration.default
-        configuration.waitsForConnectivity = true
-        configuration.timeoutIntervalForRequest = 15
-        session = URLSession(
-            configuration: configuration,
-            delegate: PinningDelegate(expectedFingerprint: fingerprint, host: instance.endpoint),
-            delegateQueue: nil
-        )
-
-        guard let url = URL(string: "wss://\(instance.endpoint)/ws") else {
-            publish(.stateChanged(.failed("invalid endpoint")))
-            return
+    init(endpoint: String, fingerprint: String) throws {
+        guard let url = URL(string: "wss://\(endpoint)/ws") else {
+            throw URLError(.badURL)
         }
-
-        publish(.stateChanged(.connecting))
-        let socket = session.webSocketTask(with: url)
-        // Keep the socket alive while the app is backgrounded briefly.
-        socket.maximumMessageSize = 4 * 1024 * 1024
-        task = socket
-        socket.resume()
-        receive()
-        startPing()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.waitsForConnectivity = false
+        let delegate = SocketDelegate(fingerprint: fingerprint)
+        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        task = session.webSocketTask(with: url)
+        task.maximumMessageSize = 1 << 20
+        delegate.client = self
     }
 
-    func disconnect() {
-        pingTimer?.invalidate()
-        pingTimer = nil
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
-        session?.invalidateAndCancel()
-        session = nil
-        publish(.stateChanged(.idle))
+    func start(onEvent: @escaping (Event) -> Void) {
+        self.onEvent = onEvent
+        task.resume()
+        receive()
     }
 
     func send(_ message: Wire.ClientMessage) {
-        guard let task else { return }
-        let text = message.encoded()
-        task.send(.string(text)) { [weak self] error in
+        guard !closed else { return }
+        task.send(.string(message.json())) { [weak self] error in
             guard let error else { return }
-            Task { @MainActor in
-                self?.publish(.closed("send failed: \(error.localizedDescription)"))
-            }
+            Task { @MainActor in self?.finish("send failed: \(error.localizedDescription)") }
         }
     }
 
+    func close() {
+        guard !closed else { return }
+        closed = true
+        onEvent = nil
+        task.cancel(with: .normalClosure, reason: nil)
+        session.invalidateAndCancel()
+    }
+
+    // MARK: - Private
+
     private func receive() {
-        task?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure(let error):
-                Task { @MainActor in
-                    self.publish(.closed(error.localizedDescription))
-                }
-            case .success(let message):
-                switch message {
-                case .string(let text):
-                    Task { @MainActor in
-                        if let decoded = Wire.ServerMessage.decode(text) {
-                            self.publish(.message(decoded))
+        task.receive { [weak self] result in
+            Task { @MainActor in
+                guard let self, !self.closed else { return }
+                switch result {
+                case .failure(let error):
+                    self.finish(error.localizedDescription)
+                case .success(let frame):
+                    let text: String?
+                    switch frame {
+                    case .string(let value): text = value
+                    case .data(let data): text = String(data: data, encoding: .utf8)
+                    @unknown default: text = nil
+                    }
+                    if let text {
+                        do {
+                            self.onEvent?(.message(try Wire.ServerMessage.decode(text)))
+                        } catch {
+                            // An unknown message from a newer server is not fatal.
+                            Log.signal.info("ignoring message: \(error.localizedDescription)")
                         }
                     }
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8),
-                        let decoded = Wire.ServerMessage.decode(text) {
-                        Task { @MainActor in
-                            self.publish(.message(decoded))
-                        }
-                    }
-                @unknown default:
-                    break
-                }
-                Task { @MainActor in
                     self.receive()
                 }
             }
         }
     }
 
-    private func startPing() {
-        // A 20 s ping keeps NAT mappings alive and detects a dead socket before
-        // the user notices a frozen frame.
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.task?.sendPing { error in
-                guard let error else { return }
-                Task { @MainActor in
-                    self.publish(.closed("ping failed: \(error.localizedDescription)"))
-                }
-            }
-        }
+    fileprivate func didOpen() {
+        guard !closed else { return }
+        onEvent?(.opened)
     }
 
-    private func publish(_ event: Event) {
-        if case .stateChanged(let newState) = event {
-            state = newState
-        }
-        handler?(event)
+    fileprivate func finish(_ reason: String) {
+        guard !closed else { return }
+        let handler = onEvent
+        close()
+        handler?(.closed(reason: reason))
     }
 }
 
-/// Pins the server certificate by SHA-256 fingerprint.
-///
-/// Hostname verification is skipped on purpose: a self-hosted instance usually has
-/// no DNS name, and the fingerprint is a stronger check than a CA chain.
-final class PinningDelegate: NSObject, URLSessionDelegate {
-    private let expectedFingerprint: String
-    private let host: String
+/// Pins the certificate and reports socket lifecycle back to the client.
+private final class SocketDelegate: NSObject, URLSessionWebSocketDelegate {
+    private let fingerprint: String
+    weak var client: SignalingClient?
 
-    init(expectedFingerprint: String, host: String) {
-        self.expectedFingerprint = expectedFingerprint
-        self.host = host
+    init(fingerprint: String) {
+        self.fingerprint = fingerprint.lowercased()
     }
 
     func urlSession(
@@ -160,41 +113,39 @@ final class PinningDelegate: NSObject, URLSessionDelegate {
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-            let trust = challenge.protectionSpace.serverTrust
+            let trust = challenge.protectionSpace.serverTrust,
+            let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first
         else {
             completionHandler(.performDefaultHandling, nil)
             return
         }
-
-        guard let certificate = certificate(from: trust) else {
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        let digest = SHA256Digest.hex(certificate)
-        if digest == expectedFingerprint {
+        let digest = SHA256.hash(data: SecCertificateCopyData(leaf) as Data)
+            .map { String(format: "%02x", $0) }.joined()
+        if digest == fingerprint {
             completionHandler(.useCredential, URLCredential(trust: trust))
         } else {
-            NSLog("waystone: certificate pin mismatch, refusing the connection")
+            Log.signal.error("certificate fingerprint mismatch")
             completionHandler(.cancelAuthenticationChallenge, nil)
         }
     }
 
-    private func certificate(from trust: SecTrust) -> Data? {
-        if #available(iOS 15.0, *) {
-            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
-                let first = chain.first
-            else { return nil }
-            return SecCertificateCopyData(first) as Data
-        }
-        guard let certificate = SecTrustGetCertificateAtIndex(trust, 0) else { return nil }
-        return SecCertificateCopyData(certificate) as Data
+    func urlSession(
+        _ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        Task { @MainActor [weak client] in client?.didOpen() }
     }
-}
 
-/// Small helper so the delegate does not need to import CryptoKit in two places.
-enum SHA256Digest {
-    static func hex(_ data: Data) -> String {
-        CryptoKit.SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    func urlSession(
+        _ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?
+    ) {
+        let text = reason.flatMap { String(data: $0, encoding: .utf8) } ?? "closed (\(closeCode.rawValue))"
+        Task { @MainActor [weak client] in client?.finish(text) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let error else { return }
+        Task { @MainActor [weak client] in client?.finish(error.localizedDescription) }
     }
 }

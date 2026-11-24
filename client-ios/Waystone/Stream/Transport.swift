@@ -1,107 +1,64 @@
 import Foundation
 
-/// Thin Swift wrapper around the Rust transport (`crates/waystone-rtc`).
+/// Swift face of the Rust transport (`crates/waystone-rtc`, C ABI in
+/// `waystone_rtc.h`).
 ///
-/// All the networking, ICE, DTLS and RTP work happens in Rust so the phone and the
-/// host cannot drift apart. This type only marshals frames across the C boundary.
+/// ICE, DTLS, RTP and the data channels all live in Rust so the phone and the
+/// host share one implementation. Callbacks arrive on a Rust thread: media is
+/// handed straight to `MediaSink` there (hopping to the main thread per frame
+/// would add latency for nothing), control events go to `onControl`, which the
+/// caller is expected to hop to the main actor.
 final class Transport {
-    /// Events the transport surfaces.
-    enum Event {
+    enum ControlEvent {
         case localOffer(String)
-        case localAnswer(String)
         case localCandidate(String)
         case connected
         case disconnected
-        case mediaReady
-        case pathUpdate(rttMs: UInt32?, relayed: Bool, estimatedBitrate: UInt32?)
-        case keyframeRequest
+        case path(relayed: Bool, rttMs: UInt32?)
         case closed(String)
-        case video(data: [UInt8], keyframe: Bool, rtpTime: UInt64)
-        case audio(data: [UInt8], rtpTime: UInt64)
-        case input(data: [UInt8], reliable: Bool)
+    }
+
+    struct Configuration {
+        var audio: Bool
+        var codec: Wire.VideoCodec
+        /// STUN server, `host:port`.
+        var stun: String?
+        var turn: Wire.TurnCredentials?
     }
 
     private var handle: OpaquePointer?
-    private let handler: (Event) -> Void
-    private var retainedSelf: UnsafeMutableRawPointer?
+    private let callbacks: Callbacks
 
-    /// Starts the transport. Returns nil when the engine cannot bind.
-    init?(
-        role: String,
-        viewport: Wire.Viewport?,
-        audio: Bool,
-        stun: String?,
-        turn: (server: String, username: String, password: String)?,
-        videoCodec: String = "h265",
-        handler: @escaping (Event) -> Void
-    ) {
-        self.handler = handler
+    /// Starts the engine; the controller side offers immediately.
+    init(
+        _ configuration: Configuration, media: MediaSink,
+        onControl: @escaping (ControlEvent) -> Void
+    ) throws {
+        callbacks = Callbacks(media: media, onControl: onControl)
 
         var config: [String: Any] = [
-            "role": role, "audio": audio, "video_codec": videoCodec,
+            "role": "controller",
+            "audio": configuration.audio,
+            "video_codec": configuration.codec.rawValue,
+            "bind": "0.0.0.0:0",
         ]
-        if let viewport {
-            config["viewport"] = [
-                "width": viewport.width,
-                "height": viewport.height,
-                "dpi": viewport.dpi,
-                "fps": viewport.fps,
-            ]
-        }
-        if let stun { config["stun"] = stun }
-        if let turn {
+        if let stun = configuration.stun { config["stun"] = stun }
+        if let turn = configuration.turn {
             config["turn"] = [
-                "server": turn.server,
-                "username": turn.username,
-                "password": turn.password,
-                "relay_bitrate_ceiling": 4_000_000,
+                "server": turn.server, "username": turn.username, "password": turn.password,
             ]
         }
-        config["bind"] = "0.0.0.0:0"
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: config), as: UTF8.self)
 
-        guard let json = try? JSONSerialization.data(withJSONObject: config),
-            let jsonText = String(data: json, encoding: .utf8)
-        else { return nil }
-
-        // The context is `self`: the Rust side calls back into the trampoline with
-        // it, and the unmanaged reference keeps the object alive for the lifetime
-        // of the handle.
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        self.retainedSelf = context
-
-        var errorBuffer = [CChar](repeating: 0, count: 512)
-        let handle = jsonText.withCString { configPointer in
-            ws_engine_start(configPointer, transportCallback, context, &errorBuffer, errorBuffer.count)
-        }
-        guard let handle else {
-            NSLog("waystone: transport failed to start: \(String(cString: errorBuffer))")
-            return nil
-        }
-        self.handle = handle
-    }
-
-    deinit {
-        if let handle {
-            ws_engine_stop(handle)
+        var error = [CChar](repeating: 0, count: 512)
+        let context = Unmanaged.passUnretained(callbacks).toOpaque()
+        handle = json.withCString { ws_engine_start($0, transportCallback, context, &error, error.count) }
+        guard handle != nil else {
+            throw TransportError.start(String(cString: error))
         }
     }
 
-    var localPort: String {
-        guard let handle else { return "" }
-        var buffer = [CChar](repeating: 0, count: 16)
-        let written = ws_engine_local_port(handle, &buffer, buffer.count)
-        return written > 0 ? String(cString: buffer) : ""
-    }
-
-    func offer() {
-        guard let handle else { return }
-        ws_engine_offer(handle)
-    }
-
-    func acceptOffer(_ sdp: String) {
-        guard let handle else { return }
-        sdp.withCString { ws_engine_accept_offer(handle, $0) }
-    }
+    deinit { stop() }
 
     func acceptAnswer(_ sdp: String) {
         guard let handle else { return }
@@ -113,114 +70,107 @@ final class Transport {
         candidate.withCString { ws_engine_add_candidate(handle, $0) }
     }
 
-    func sendInput(_ frame: Data, reliable: Bool) {
-        guard let handle, !frame.isEmpty else { return }
+    func send(_ event: InputEvent) {
+        guard let handle else { return }
+        let frame = event.encoded()
         frame.withUnsafeBytes { raw in
             guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-            ws_engine_send_input(handle, reliable, base, frame.count)
+            ws_engine_send_input(handle, event.isReliable, base, raw.count)
         }
     }
 
-    func setVideoBitrate(_ bitsPerSecond: UInt32) {
-        guard let handle else { return }
-        ws_engine_set_video_bitrate(handle, bitsPerSecond)
-    }
-
+    /// Stops the engine. No callback runs once this returns, which is what
+    /// makes the unretained callback context safe.
     func stop() {
         guard let handle else { return }
-        ws_engine_stop(handle)
         self.handle = nil
+        ws_engine_stop(handle)
     }
+}
 
-    /// Dispatches a callback from Rust.
-    fileprivate func dispatch(kind: Int32, bytes: [UInt8]) {
-        switch kind {
-        case Int32(WS_EVENT_VIDEO.rawValue), Int32(WS_EVENT_AUDIO.rawValue):
-            guard let (header, payload) = MediaHeader.parse(bytes) else { return }
-            if kind == Int32(WS_EVENT_VIDEO.rawValue) {
-                handler(.video(data: payload, keyframe: header.keyframe, rtpTime: header.rtpTime))
-            } else {
-                handler(.audio(data: payload, rtpTime: header.rtpTime))
-            }
-        case Int32(WS_EVENT_INPUT.rawValue):
-            guard let (header, payload) = MediaHeader.parse(bytes) else { return }
-            handler(.input(data: payload, reliable: header.reliable))
-        case Int32(WS_EVENT_CONTROL.rawValue):
-            guard let json = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any],
-                let kind = json["kind"] as? String
-            else { return }
-            dispatchControl(kind: kind, json: json)
-        default:
-            break
-        }
-    }
+enum TransportError: LocalizedError {
+    case start(String)
 
-    private func dispatchControl(kind: String, json: [String: Any]) {
-        switch kind {
-        case "local_offer":
-            handler(.localOffer(json["sdp"] as? String ?? ""))
-        case "local_answer":
-            handler(.localAnswer(json["sdp"] as? String ?? ""))
-        case "local_candidate":
-            handler(.localCandidate(json["candidate"] as? String ?? ""))
-        case "connected":
-            handler(.connected)
-        case "disconnected":
-            handler(.disconnected)
-        case "media_ready":
-            handler(.mediaReady)
-        case "path_update":
-            handler(
-                .pathUpdate(
-                    rttMs: (json["rttMs"] as? NSNumber)?.uint32Value,
-                    relayed: json["relayed"] as? Bool ?? false,
-                    estimatedBitrate: (json["estimatedBitrate"] as? NSNumber)?.uint32Value))
-        case "keyframe_request":
-            handler(.keyframeRequest)
-        case "closed":
-            handler(.closed(json["reason"] as? String ?? ""))
-        default:
-            break
+    var errorDescription: String? {
+        switch self {
+        case .start(let reason): return "无法启动传输：\(reason)"
         }
     }
 }
 
-/// C callback trampoline; the context is the `Transport` instance.
+/// Receives media on the transport thread.
+protocol MediaSink: AnyObject {
+    func video(_ frame: UnsafeBufferPointer<UInt8>, keyframe: Bool, rtpTime: UInt64)
+    func audio(_ packet: UnsafeBufferPointer<UInt8>)
+}
+
+/// The callback context; split from `Transport` so stopping the engine from
+/// its own deinit never races a callback into a half-destroyed object.
+private final class Callbacks {
+    let media: MediaSink
+    let onControl: (Transport.ControlEvent) -> Void
+
+    init(media: MediaSink, onControl: @escaping (Transport.ControlEvent) -> Void) {
+        self.media = media
+        self.onControl = onControl
+    }
+
+    func dispatch(kind: Int32, bytes: UnsafeBufferPointer<UInt8>) {
+        switch UInt32(bitPattern: kind) {
+        case WS_EVENT_VIDEO.rawValue:
+            guard let (header, payload) = MediaHeader.split(bytes) else { return }
+            media.video(payload, keyframe: header.keyframe, rtpTime: header.rtpTime)
+        case WS_EVENT_AUDIO.rawValue:
+            guard let (_, payload) = MediaHeader.split(bytes) else { return }
+            media.audio(payload)
+        case WS_EVENT_CONTROL.rawValue:
+            if let event = Self.control(from: Data(bytes)) { onControl(event) }
+        default:
+            break
+        }
+    }
+
+    private static func control(from data: Data) -> Transport.ControlEvent? {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let kind = json["kind"] as? String
+        else { return nil }
+        switch kind {
+        case "local_offer": return (json["sdp"] as? String).map { .localOffer($0) }
+        case "local_candidate": return (json["candidate"] as? String).map { .localCandidate($0) }
+        case "connected": return .connected
+        case "disconnected": return .disconnected
+        case "path_update":
+            return .path(
+                relayed: json["relayed"] as? Bool ?? false,
+                rttMs: (json["rttMs"] as? NSNumber)?.uint32Value)
+        case "closed": return .closed(json["reason"] as? String ?? "")
+        default: return nil
+        }
+    }
+}
+
 private func transportCallback(
-    kind: Int32,
-    data: UnsafePointer<UInt8>?,
-    length: Int,
-    context: UnsafeMutableRawPointer?
+    kind: Int32, data: UnsafePointer<UInt8>?, length: Int, context: UnsafeMutableRawPointer?
 ) {
     guard let context else { return }
-    let transport = Unmanaged<Transport>.fromOpaque(context).takeUnretainedValue()
-    let bytes: [UInt8]
-    if let data, length > 0 {
-        bytes = Array(UnsafeBufferPointer(start: data, count: length))
-    } else {
-        bytes = []
-    }
-    transport.dispatch(kind: kind, bytes: bytes)
+    let callbacks = Unmanaged<Callbacks>.fromOpaque(context).takeUnretainedValue()
+    callbacks.dispatch(kind: kind, bytes: UnsafeBufferPointer(start: data, count: data == nil ? 0 : length))
 }
 
-/// Decoded media header shared with `crates/waystone-rtc/src/ffi.rs`.
+/// The 16 byte header in front of every media event, `ffi.rs::MediaHeader`.
 struct MediaHeader {
-    var kind: UInt8
     var flags: UInt8
     var rtpTime: UInt64
 
     var keyframe: Bool { flags & 1 != 0 }
-    var reliable: Bool { flags & 2 != 0 }
 
     static let length = 16
 
-    static func parse(_ bytes: [UInt8]) -> (MediaHeader, [UInt8])? {
-        guard bytes.count >= length else { return nil }
+    static func split(_ bytes: UnsafeBufferPointer<UInt8>) -> (MediaHeader, UnsafeBufferPointer<UInt8>)? {
+        guard bytes.count >= length, let base = bytes.baseAddress else { return nil }
         var time: UInt64 = 0
-        for index in 2..<10 {
-            time = time << 8 | UInt64(bytes[index])
-        }
-        let header = MediaHeader(kind: bytes[0], flags: bytes[1], rtpTime: time)
-        return (header, Array(bytes[length...]))
+        for index in 2..<10 { time = time << 8 | UInt64(bytes[index]) }
+        let payload = UnsafeBufferPointer(start: base + length, count: bytes.count - length)
+        return (MediaHeader(flags: bytes[1], rtpTime: time), payload)
     }
 }

@@ -1,192 +1,127 @@
+import CoreGraphics
 import Foundation
 
-/// The direct-touch gesture state machine from the design doc.
+/// Direct touch: the finger is the cursor. Design doc section 5.2.
 ///
-/// The rules exist because card games break under naive touch mapping: a finger
-/// that drags across the hand to read tooltips must never play a card, and a
-/// deliberate long press must grab a card instead of tapping it.
+/// Card games break under a naive mapping, so a press has three outcomes:
 ///
-/// All timings are wall clock based and every transition is unit tested, because
-/// this is the part of the app users feel most directly.
-struct GestureEngine {
-    /// How long a press may last before it becomes a long press.
-    static let longPressDuration: TimeInterval = 0.16
-    /// How far a finger may drift and still count as a stationary press.
-    static let moveTolerance: CGFloat = 8
-    /// Two finger taps must be shorter than this.
-    static let twoFingerTapDuration: TimeInterval = 0.2
-
+/// * lift quickly without moving: click;
+/// * move before the hold time: hover only, and lifting never clicks (reading
+///   cards in hand must not play them);
+/// * hold still for the hold time: grab (left button down) and drag.
+///
+/// Two fingers tap for a right click, scroll in parallel, or pinch to zoom the
+/// local view.
+struct DirectTouchEngine: TouchEngine {
     enum State: Equatable {
-        /// Nothing is down.
         case idle
-        /// A single finger is down but has not committed to a gesture yet.
-        case pending(startX: Double, startY: Double, startedAt: TimeInterval)
-        /// The finger moved; send hover moves only.
-        case hovering(lastX: Double, lastY: Double)
-        /// A long press committed to a drag; left button is held.
-        case dragging(lastX: Double, lastY: Double)
-        /// Two fingers are down, possible tap or pinch.
-        case twoFingers(startedAt: TimeInterval)
-    }
-
-    /// What the caller should send to the host.
-    enum Output: Equatable {
-        case none
-        case move(x: Double, y: Double)
-        case leftDown(x: Double, y: Double)
-        case leftUp(x: Double, y: Double)
-        case rightClick(x: Double, y: Double)
-        case wheel(dx: Int16, dy: Int16)
-        case haptic(Haptic)
-    }
-
-    enum Haptic: Equatable {
-        /// Fired when a drag grabs an item.
-        case grab
-        /// Fired when a two finger tap turns into a right click.
-        case confirm
+        case pending(touch: Int, start: CGPoint, at: TimeInterval)
+        case hovering(touch: Int)
+        case dragging(touch: Int, last: CGPoint)
+        case twoFingers(TwoFingerGesture)
+        /// A multi-finger gesture ended; wait for every finger to lift.
+        case draining
     }
 
     private(set) var state: State = .idle
-    /// Local view scale, changed by pinch; never affects the host.
-    private(set) var zoom: CGFloat = 1
-    private var zoomAnchor: CGFloat = 1
-    private var lastTwoFingerY: Double?
+    private var active: [Int: CGPoint] = [:]
 
-    /// Current pointer position, normalized.
-    private(set) var pointer: (x: Double, y: Double) = (0.5, 0.5)
+    var deadline: TimeInterval? {
+        if case .pending(_, _, let start) = state { return start + TouchTuning.holdDuration }
+        return nil
+    }
 
-    /// A finger went down at a normalized position.
-    mutating func touchDown(x: Double, y: Double, at time: TimeInterval) -> [Output] {
+    mutating func began(_ touch: Int, at point: CGPoint, time: TimeInterval) -> [PointerOutput] {
+        active[touch] = point
         switch state {
         case .idle:
-            state = .pending(startX: x, startY: y, startedAt: time)
-            pointer = (x, y)
+            state = .pending(touch: touch, start: point, at: time)
             return []
-        case .pending, .hovering, .dragging:
-            // A second finger turns the gesture into a two finger one.
-            if case .dragging = state {
-                return releaseDrag()
-            }
-            state = .twoFingers(startedAt: time)
-            lastTwoFingerY = y
+        case .pending(let first, _, _), .hovering(let first):
+            guard let firstPoint = active[first] else { return [] }
+            state = .twoFingers(TwoFingerGesture((first, firstPoint), (touch, point), time: time))
             return []
-        case .twoFingers:
+        case .dragging, .twoFingers, .draining:
+            // An extra finger never drops a held card.
             return []
         }
     }
 
-    /// A finger moved; `count` is how many fingers are currently down.
-    mutating func touchMove(x: Double, y: Double, at time: TimeInterval) -> [Output] {
-        pointer = (x, y)
+    mutating func moved(_ touches: [Int: CGPoint], time: TimeInterval) -> [PointerOutput] {
+        active.merge(touches) { $1 }
         switch state {
-        case .pending(let startX, let startY, let startedAt):
-            let distance = hypot((x - startX) * Self.referenceWidth, (y - startY) * Self.referenceHeight)
-            if distance > Self.moveTolerance {
-                // Moving early means the user wants to hover, not to click.
-                state = .hovering(lastX: x, lastY: y)
-                return [.move(x: x, y: y)]
+        case .pending(let touch, let start, let startedAt):
+            guard let point = touches[touch] else { return [] }
+            if distance(point, start) > TouchTuning.slop {
+                state = .hovering(touch: touch)
+                return [.move(to: point)]
             }
-            if time - startedAt >= Self.longPressDuration {
-                state = .dragging(lastX: x, lastY: y)
-                return [.move(x: x, y: y), .leftDown(x: x, y: y), .haptic(.grab)]
+            if time - startedAt >= TouchTuning.holdDuration {
+                return grab(touch: touch, at: point)
             }
             return []
-        case .hovering:
-            state = .hovering(lastX: x, lastY: y)
-            return [.move(x: x, y: y)]
-        case .dragging:
-            state = .dragging(lastX: x, lastY: y)
-            return [.move(x: x, y: y)]
-        case .twoFingers:
-            guard let previous = lastTwoFingerY else {
-                lastTwoFingerY = y
-                return []
-            }
-            lastTwoFingerY = y
-            // Vertical two finger movement becomes a wheel, which is what reads
-            // logs and card lists naturally.
-            let delta = (y - previous) * 240
-            if abs(delta) < 1 {
-                return []
-            }
-            return [.wheel(dx: 0, dy: Int16(clamping: Int(delta)))]
-        case .idle:
+        case .hovering(let touch):
+            guard let point = touches[touch] else { return [] }
+            return [.move(to: point)]
+        case .dragging(let touch, _):
+            guard let point = touches[touch] else { return [] }
+            state = .dragging(touch: touch, last: point)
+            return [.move(to: point)]
+        case .twoFingers(var gesture):
+            let outputs = gesture.moved(active)
+            state = .twoFingers(gesture)
+            return outputs
+        case .idle, .draining:
             return []
         }
     }
 
-    /// A finger lifted.
-    mutating func touchUp(x: Double, y: Double, at time: TimeInterval) -> [Output] {
+    mutating func ended(_ touch: Int, at point: CGPoint, time: TimeInterval) -> [PointerOutput] {
+        active[touch] = nil
+        defer { if active.isEmpty { state = .idle } }
         switch state {
-        case .pending(_, _, let startedAt):
+        case .pending(let pressed, _, let startedAt) where pressed == touch:
             state = .idle
-            // A short, stationary press is a click.
-            guard time - startedAt < Self.longPressDuration else { return [] }
-            return [
-                .move(x: x, y: y),
-                .leftDown(x: x, y: y),
-                .leftUp(x: x, y: y),
-            ]
-        case .hovering:
-            // Releasing after hovering must never click: this is the rule that
-            // prevents accidental card plays.
+            guard time - startedAt < TouchTuning.holdDuration else {
+                // The hold fired between frames; finish it as a grab and drop.
+                return grab(touch: touch, at: point) + [.release(.left, at: .point(point))]
+            }
+            return [.move(to: point), .click(.left, at: .point(point))]
+        case .hovering(let hovering) where hovering == touch:
             state = .idle
             return []
-        case .dragging:
-            // Release at the finger's final position, so a drag that ends with a
-            // quick flick still lands where the user let go.
-            state = .idle
-            return [.leftUp(x: x, y: y)]
-        case .twoFingers(let startedAt):
-            state = .idle
-            guard time - startedAt < Self.twoFingerTapDuration else { return [] }
-            return [.rightClick(x: x, y: y), .haptic(.confirm)]
-        case .idle:
-            return []
-        }
-    }
-
-    /// The whole gesture was cancelled, for example by a system gesture.
-    mutating func cancel() -> [Output] {
-        switch state {
-        case .dragging:
-            return releaseDrag()
+        case .dragging(let dragging, _) where dragging == touch:
+            state = .draining
+            return [.release(.left, at: .point(point))]
+        case .twoFingers(let gesture):
+            state = .draining
+            guard gesture.isTap(endedAt: time) else { return [] }
+            let at = gesture.centroid
+            return [.move(to: at), .click(.right, at: .point(at)), .haptic(.secondary)]
         default:
-            state = .idle
             return []
         }
     }
 
-    /// Applies a pinch scale from a `UIPinchGestureRecognizer`.
-    mutating func pinch(scale: CGFloat, ended: Bool) -> CGFloat {
-        if !ended {
-            zoom = min(max(zoomAnchor * scale, 1), 4)
-        } else {
-            zoomAnchor = zoom
+    mutating func cancelled() -> [PointerOutput] {
+        active.removeAll()
+        defer { state = .idle }
+        if case .dragging(_, let last) = state {
+            return [.release(.left, at: .point(last))]
         }
-        return zoom
+        return []
     }
 
-    /// Resets the local zoom back to 1.
-    mutating func resetZoom() {
-        zoom = 1
-        zoomAnchor = 1
+    mutating func tick(time: TimeInterval) -> [PointerOutput] {
+        guard case .pending(let touch, _, let startedAt) = state,
+            time - startedAt >= TouchTuning.holdDuration,
+            let point = active[touch]
+        else { return [] }
+        return grab(touch: touch, at: point)
     }
 
-    private mutating func releaseDrag() -> [Output] {
-        let last: (Double, Double)
-        if case .dragging(let x, let y) = state {
-            last = (x, y)
-        } else {
-            last = pointer
-        }
-        state = .idle
-        return [.leftUp(x: last.0, y: last.1)]
+    private mutating func grab(touch: Int, at point: CGPoint) -> [PointerOutput] {
+        state = .dragging(touch: touch, last: point)
+        return [.move(to: point), .press(.left, at: .point(point)), .haptic(.grab)]
     }
-
-    /// Normalized distance thresholds make the gesture feel identical on a phone
-    /// and an iPad, so `moveTolerance` is expressed in a 1000 pt reference space.
-    private static let referenceWidth: CGFloat = 1000
-    private static let referenceHeight: CGFloat = 1000
 }

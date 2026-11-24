@@ -1,276 +1,142 @@
 import SwiftUI
 
-/// Full screen stream: Metal view, touch surface, floating ball and capsules.
+/// A running stream, edge to edge.
 ///
-/// The rule from the design doc is that the top of the screen belongs to the
-/// remote window, so there is no toolbar at all; every control lives in the
-/// floating ball on the side.
+/// Design doc 5.3: the top of the screen belongs to the remote window, so there
+/// is no toolbar; the floating ball is the only persistent control. Design doc
+/// 5.4: a stall never blacks out the picture or blocks it with a modal; it
+/// shows a small banner over the last frame.
 struct StreamView: View {
-    @EnvironmentObject private var controller: SessionController
+    @ObservedObject var session: StreamSession
+    @EnvironmentObject private var preferences: StreamPreferences
+
+    var body: some View {
+        StreamContent(session: session, input: session.input, preferences: preferences)
+            .onAppear { AppDelegate.lock(.landscape) }
+            .onDisappear { AppDelegate.lock(.all) }
+    }
+}
+
+private struct StreamContent: View {
+    @ObservedObject var session: StreamSession
+    @ObservedObject var input: InputController
+    @ObservedObject var preferences: StreamPreferences
     @State private var panelOpen = false
-    @State private var ballHidden = false
-    @State private var pinchScale: CGFloat = 1
+    @State private var keyboard = false
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                Color.black.ignoresSafeArea()
+        ZStack {
+            Color.black.ignoresSafeArea()
 
-                RemoteSurface(controller: controller)
+            StreamSurface(session: session, geometry: input.geometry)
+                .ignoresSafeArea()
+
+            if input.mode == .trackpad {
+                LocalCursor(position: input.geometry.surfacePoint(x: input.cursor.x, y: input.cursor.y))
                     .ignoresSafeArea()
-                    .scaleEffect(pinchScale)
-                    .gesture(
-                        MagnificationGesture()
-                            .onChanged { value in
-                                pinchScale = controller.pinch(scale: value, ended: false)
-                            }
-                            .onEnded { _ in
-                                pinchScale = controller.pinch(scale: 1, ended: true)
-                            }
-                    )
-                    .simultaneousGesture(
-                        SpatialTapGesture(count: 2).onEnded { _ in
-                            controller.requestKeyframe()
-                        }
-                    )
+            }
 
-                // Edge capsules, one column per side, tuned per preset.
-                HStack {
-                    capsuleColumn(alignment: .leading)
-                    Spacer()
-                    capsuleColumn(alignment: .trailing)
-                }
-                .padding(.horizontal, 2)
-                .allowsHitTesting(true)
+            if session.stage != .connecting {
+                HotkeyLayer(preset: preferences.preset, input: input)
+            }
 
-                // Floating ball is the only persistent control.
-                ball
-                    .position(
-                        x: geometry.size.width - 28,
-                        y: geometry.size.height / 2
-                    )
-                    .opacity(ballHidden ? 0.3 : 0.85)
-                    .animation(.easeInOut(duration: 0.2), value: ballHidden)
+            SoftKeyboard(visible: $keyboard, input: input)
+                .frame(width: 1, height: 1)
+                .opacity(0)
 
-                statusCapsule
-                    .padding(.top, 8)
+            if case .stalled = session.stage {
+                StallBanner()
                     .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .allowsHitTesting(false)
+            }
 
-                if case .ended(let reason) = controller.phase {
-                    disconnectedOverlay(reason: reason)
+            if session.stage == .connecting {
+                ConnectingOverlay(host: session.host.name, progress: session.progress) {
+                    session.hangUp(lock: false)
                 }
             }
-            .statusBarHidden(true)
-            .persistentSystemOverlays(.hidden)
-        }
-    }
 
-    // MARK: - Capsules
+            FloatingBall(health: health) {
+                withAnimation(.spring(duration: 0.25)) { panelOpen.toggle() }
+            }
+            .ignoresSafeArea()
 
-    @ViewBuilder
-    private func capsuleColumn(alignment: HorizontalAlignment) -> some View {
-        VStack(spacing: 8) {
-            ForEach(controller.selectedPreset.capsules) { capsule in
-                CapsuleButton(capsule: capsule) {
-                    controller.press(capsule)
-                }
+            if panelOpen {
+                Color.black.opacity(0.25)
+                    .ignoresSafeArea()
+                    .onTapGesture { withAnimation { panelOpen = false } }
+                ControlPanel(
+                    session: session, input: input,
+                    showKeyboard: { keyboard = true },
+                    close: { withAnimation { panelOpen = false } })
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
         }
-        .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
-        .padding(.vertical, 60)
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        .defersSystemGestures(on: .all)
     }
 
-    private var ball: some View {
-        Button {
-            panelOpen.toggle()
-            ballHidden = false
-        } label: {
-            Circle()
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    Image(systemName: "circle.grid.cross")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                )
-                .frame(width: 36, height: 36)
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $panelOpen, arrowEdge: .trailing) {
-            ControlPanel(controller: controller)
-                .presentationCompactAdaptation(.popover)
+    private var health: FloatingBall.Health {
+        switch session.stage {
+        case .stalled: return .stalled
+        case .connecting: return .degraded
+        default: return session.path.relayed ? .degraded : .good
         }
     }
+}
 
-    private var statusCapsule: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(controller.path.isHealthy ? Color.green : Color.yellow)
-                .frame(width: 7, height: 7)
-            Text(controller.path.label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.white)
+/// A small ring that follows the remote cursor in trackpad mode, so the
+/// cursor moves under the finger before the video catches up.
+private struct LocalCursor: View {
+    var position: CGPoint
+
+    var body: some View {
+        Circle()
+            .strokeBorder(.white, lineWidth: 2)
+            .background(Circle().fill(.black.opacity(0.25)))
+            .frame(width: 18, height: 18)
+            .shadow(radius: 2)
+            .position(position)
+            .allowsHitTesting(false)
+    }
+}
+
+private struct StallBanner: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("网络波动，正在恢复画面…")
+                .font(.footnote.weight(.medium))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
-        .opacity(0.9)
-    }
-
-    private func disconnectedOverlay(reason: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 32))
-                .foregroundStyle(.orange)
-            Text(reason)
-                .font(.callout)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
-            Button("Back") {
-                controller.hangUp(lock: false)
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .padding(24)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 }
 
-/// One edge capsule.
-private struct CapsuleButton: View {
-    var capsule: SessionController.HotkeyCapsule
-    var action: () -> Void
+private struct ConnectingOverlay: View {
+    var host: String
+    var progress: String
+    var cancel: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Text(capsule.title)
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial, in: Capsule())
-                .foregroundStyle(.white.opacity(0.9))
-        }
-        .buttonStyle(.plain)
-        .frame(width: 56)
-    }
-}
-
-/// The Metal backed surface that receives touches.
-private struct RemoteSurface: UIViewRepresentable {
-    var controller: SessionController
-
-    func makeUIView(context: Context) -> TouchView {
-        let view = TouchView()
-        view.backgroundColor = .black
-        view.isMultipleTouchEnabled = true
-        view.onTouches = { event, point in
-            let size = view.bounds.size
-            switch event {
-            case .began: controller.touchBegan(at: point, in: size)
-            case .moved: controller.touchMoved(to: point, in: size)
-            case .ended: controller.touchEnded(at: point, in: size)
-            case .cancelled: controller.touchCancelled()
-            }
-        }
-        return view
-    }
-
-    func updateUIView(_ view: TouchView, context: Context) {
-        if view.videoView.superview == nil {
-            view.addSubview(view.videoView)
-            view.videoView.frame = view.bounds
-            view.videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            controller.attach(view: view.videoView)
-        }
-    }
-}
-
-/// Hosts the `VideoView` and forwards raw touches.
-///
-/// `UIView` touches are used instead of SwiftUI gestures because the gesture state
-/// machine needs every touch phase with sub-frame timing.
-private final class TouchView: UIView {
-    enum TouchEvent {
-        case began
-        case moved
-        case ended
-        case cancelled
-    }
-
-    let videoView = VideoView(frame: .zero)
-    var onTouches: ((TouchEvent, CGPoint) -> Void)?
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        super.touchesBegan(touches, with: event)
-        guard let touch = touches.first else { return }
-        onTouches?(.began, touch.location(in: self))
-    }
-
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        super.touchesMoved(touches, with: event)
-        guard let touch = touches.first else { return }
-        onTouches?(.moved, touch.location(in: self))
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        super.touchesEnded(touches, with: event)
-        guard let touch = touches.first else { return }
-        onTouches?(.ended, touch.location(in: self))
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        super.touchesCancelled(touches, with: event)
-        onTouches?(.cancelled, .zero)
-    }
-}
-
-/// The floating ball panel: touch mode, preset, frame rate, audio, hang up.
-private struct ControlPanel: View {
-    @ObservedObject var controller: SessionController
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Stream")
-                .font(.caption.weight(.semibold))
+        VStack(spacing: 16) {
+            Image(systemName: "desktopcomputer")
+                .font(.system(size: 40))
                 .foregroundStyle(.secondary)
-
-            Toggle("Sound", isOn: Binding(
-                get: { !controller.audioMuted },
-                set: { controller.setAudioMuted(!$0) }
-            ))
-            .toggleStyle(.switch)
-
-            Picker("Frames", selection: Binding(
-                get: { controller.frameRate },
-                set: { controller.setFrameRate($0) }
-            )) {
-                ForEach(SessionController.FrameRateTier.allCases, id: \.rawValue) { tier in
-                    Text(tier.label).tag(tier)
-                }
+            Text(host).font(.title3.weight(.semibold))
+            HStack(spacing: 8) {
+                ProgressView()
+                Text(progress).foregroundStyle(.secondary)
             }
-            .pickerStyle(.segmented)
-
-            Picker("Keys", selection: $controller.selectedPreset) {
-                ForEach(SessionController.HotkeyPreset.allCases) { preset in
-                    Text(preset.label).tag(preset)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Picker("Touch", selection: $controller.touchMode) {
-                ForEach(SessionController.TouchMode.allCases, id: \.rawValue) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            Button(role: .destructive) {
-                controller.hangUp(lock: true)
-            } label: {
-                Label("Disconnect and lock", systemImage: "lock")
-                    .font(.footnote)
-            }
+            Button("取消", action: cancel)
+                .buttonStyle(.bordered)
+                .padding(.top, 8)
         }
-        .padding(16)
-        .frame(width: 260)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
     }
 }

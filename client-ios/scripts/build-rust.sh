@@ -37,7 +37,7 @@ build_slice aarch64-apple-ios-sim
 
 rm -rf "$OUT/WaystoneRTC.xcframework"
 mkdir -p "$OUT/include"
-cp "$ROOT/client-ios/Waystone/Transport/waystone_rtc.h" "$OUT/include/waystone_rtc.h"
+cp "$ROOT/client-ios/Waystone/Stream/waystone_rtc.h" "$OUT/include/waystone_rtc.h"
 
 echo "==> xcframework"
 xcodebuild -create-xcframework \

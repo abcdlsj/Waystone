@@ -1,178 +1,272 @@
 import SwiftUI
 
-/// Home screen: the instance card, its hosts and the pairing entry point.
+/// Home: every machine in every enrolled pool, one tap to stream.
 ///
-/// The layout follows the product rule that the app must be usable with one hand
-/// and zero configuration: one big list of machines, one button to add another.
+/// Design doc 3.2: from opening the app to seeing the home computer must take
+/// under 30 seconds and no typing, so the only actions here are "tap a
+/// computer" and "add a server".
 struct HomeView: View {
-    @EnvironmentObject private var store: InstanceStore
-    @EnvironmentObject private var controller: SessionController
-    @State private var scanning = false
+    @EnvironmentObject private var model: AppModel
+    @State private var addingServer = false
 
     var body: some View {
         NavigationStack {
             Group {
-                if store.instances.isEmpty {
-                    emptyState
+                if model.pools.isEmpty {
+                    EmptyPoolView { addingServer = true }
                 } else {
-                    instanceList
+                    poolList
                 }
             }
             .navigationTitle("Waystone")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        scanning = true
+                        addingServer = true
                     } label: {
-                        Label("Add device", systemImage: "plus")
+                        Image(systemName: "plus")
                     }
+                    .accessibilityLabel("添加服务器")
                 }
             }
-            .sheet(isPresented: $scanning) {
-                NavigationStack {
-                    PairingScannerView { uri in
-                        controller.pair(with: uri)
-                    }
-                }
-            }
-            .fullScreenCover(isPresented: streamingBinding) {
-                StreamView()
-                    .environmentObject(controller)
-            }
-            .alert(
-                "Something went wrong",
-                isPresented: errorBinding,
-                actions: {
-                    Button("OK", role: .cancel) {}
-                },
-                message: {
-                    Text(controller.lastError ?? "Unknown error")
-                }
-            )
+        }
+        .sheet(isPresented: $addingServer) {
+            PairingSheet()
+        }
+        .overlay(alignment: .bottom) { noticeOverlay }
+        .alert("添加失败", isPresented: pairingFailed) {
+            Button("好", role: .cancel) { model.dismissPairingError() }
+        } message: {
+            if case .failed(let reason) = model.pairing { Text(reason) }
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "rectangle.inset.filled.and.person.filled")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
-            Text("No computers yet")
-                .font(.title3.weight(.semibold))
-            Text("Open the Waystone panel on your computer and scan the pairing code. No IP addresses, no ports.")
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 32)
-            Button {
-                scanning = true
-            } label: {
-                Label("Scan pairing code", systemImage: "qrcode.viewfinder")
+    private var poolList: some View {
+        List {
+            ForEach(model.pools) { pool in
+                PoolSection(pool: pool)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .refreshable { model.refresh() }
+    }
+
+    @ViewBuilder
+    private var noticeOverlay: some View {
+        VStack(spacing: 8) {
+            if case .inProgress(let endpoint) = model.pairing {
+                NoticeCard(symbol: nil, title: "正在添加 \(endpoint)…", message: nil)
+            }
+            if let notice = model.notice {
+                NoticeCard(symbol: "info.circle", title: notice.title, message: notice.message)
+                    .onTapGesture { model.notice = nil }
+                    .task(id: notice.id) {
+                        try? await Task.sleep(for: .seconds(6))
+                        if model.notice?.id == notice.id { model.notice = nil }
+                    }
+            }
+        }
+        .padding()
+        .animation(.spring(duration: 0.3), value: model.notice)
+        .animation(.spring(duration: 0.3), value: model.pairing)
+    }
+
+    private var pairingFailed: Binding<Bool> {
+        Binding(
+            get: { if case .failed = model.pairing { return true } else { return false } },
+            set: { if !$0 { model.dismissPairingError() } })
+    }
+}
+
+/// One server and its machines.
+private struct PoolSection: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var pool: PoolConnection
+    @State private var confirmForget = false
+
+    var body: some View {
+        Section {
+            switch pool.status {
+            case .online where pool.hosts.isEmpty:
+                Label("还没有电脑加入。在电脑上运行 `waystone-host pair` 并粘贴面板上的主机配对码。", systemImage: "desktopcomputer")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .rejected(let reason):
+                Label(reason, systemImage: "exclamationmark.octagon")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            default:
+                ForEach(pool.hosts) { host in
+                    HostRow(host: host, reachable: pool.isOnline) {
+                        model.connect(to: host, in: pool)
+                    }
+                }
+                if pool.hosts.isEmpty, case .connecting = pool.status {
+                    HStack {
+                        ProgressView()
+                        Text("正在连接服务器…").foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } header: {
+            HStack {
+                Text(pool.instance.label)
+                Spacer()
+                StatusPill(status: pool.status) { pool.reconnectNow() }
+                Menu {
+                    Button("重新连接", systemImage: "arrow.clockwise") { pool.reconnectNow() }
+                    Button("移除此服务器", systemImage: "trash", role: .destructive) { confirmForget = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("服务器选项")
+            }
+        }
+        .confirmationDialog(
+            "移除 \(pool.instance.label)？", isPresented: $confirmForget, titleVisibility: .visible
+        ) {
+            Button("移除", role: .destructive) { model.forget(pool) }
+        } message: {
+            Text("之后需要重新扫码才能连接这台服务器上的电脑。")
+        }
+    }
+}
+
+private struct StatusPill: View {
+    var status: PoolConnection.Status
+    var retry: () -> Void
+
+    var body: some View {
+        switch status {
+        case .online:
+            Label("在线", systemImage: "circle.fill")
+                .labelStyle(DotLabelStyle(color: .green))
+        case .connecting:
+            ProgressView().controlSize(.mini)
+        case .offline(let reason):
+            Button(action: retry) {
+                Label(reason, systemImage: "circle.fill")
+                    .labelStyle(DotLabelStyle(color: .orange))
+            }
+            .buttonStyle(.plain)
+        case .rejected:
+            Label("已移除", systemImage: "circle.fill")
+                .labelStyle(DotLabelStyle(color: .red))
+        }
+    }
+}
+
+private struct DotLabelStyle: LabelStyle {
+    var color: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            configuration.title
+                .font(.caption2)
+                .lineLimit(1)
+                .textCase(nil)
+        }
+    }
+}
+
+/// A machine card: big, one tap, with an honest state.
+private struct HostRow: View {
+    var host: Host
+    var reachable: Bool
+    var connect: () -> Void
+
+    private var available: Bool { reachable && host.online && !host.busy }
+
+    var body: some View {
+        Button(action: connect) {
+            HStack(spacing: 14) {
+                Image(systemName: symbol)
+                    .font(.title2)
+                    .frame(width: 36)
+                    .foregroundStyle(available ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(host.name)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(available ? .primary : .secondary)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if available {
+                    Image(systemName: "play.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+        .accessibilityHint(available ? "开始串流" : subtitle)
+    }
+
+    private var subtitle: String {
+        guard reachable else { return "服务器未连接" }
+        guard host.online else { return "离线或休眠" }
+        if host.busy { return "正在被其他设备使用" }
+        if let rtt = host.rttMs { return "在线 · 服务器延迟 \(rtt) ms" }
+        return "在线"
+    }
+
+    private var symbol: String {
+        switch host.platform {
+        case .macos: return "laptopcomputer"
+        case .windows: return "pc"
+        case .linux: return "server.rack"
+        default: return "desktopcomputer"
+        }
+    }
+}
+
+private struct EmptyPoolView: View {
+    var add: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("还没有电脑", systemImage: "desktopcomputer")
+        } description: {
+            Text("打开 Waystone 服务器面板，点「添加我的设备」，然后扫描二维码。\n不用输入 IP、端口或密码。")
+        } actions: {
+            Button(action: add) {
+                Label("扫码添加", systemImage: "qrcode.viewfinder")
                     .padding(.horizontal, 8)
             }
             .buttonStyle(.borderedProminent)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
 
-    private var instanceList: some View {
-        List {
-            ForEach(store.instances) { instance in
-                Section {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(instance.label)
-                                .font(.headline)
-                            Text(instance.endpoint)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        connectionBadge
-                    }
-                    ForEach(hostsFor(instance)) { host in
-                        Button {
-                            controller.connect(to: instance, andStart: host)
-                        } label: {
-                            HStack {
-                                Image(systemName: icon(for: host.platform))
-                                    .foregroundStyle(.secondary)
-                                Text(host.name)
-                                Spacer()
-                                Circle()
-                                    .fill(host.online ? Color.green : Color.secondary.opacity(0.4))
-                                    .frame(width: 8, height: 8)
-                            }
-                        }
-                        .disabled(!host.online)
-                    }
-                } header: {
-                    Text(instance.label)
-                } footer: {
-                    if let lastSeen = instance.lastSeen {
-                        Text("Last connected \(relative(lastSeen))")
-                    }
+struct NoticeCard: View {
+    var symbol: String?
+    var title: String
+    var message: String?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if let symbol {
+                Image(systemName: symbol).foregroundStyle(.orange)
+            } else {
+                ProgressView()
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline.weight(.semibold))
+                if let message {
+                    Text(message).font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            .onDelete { offsets in
-                for index in offsets {
-                    controller.forget(store.instances[index])
-                }
-            }
+            Spacer(minLength: 0)
         }
-    }
-
-    @ViewBuilder
-    private var connectionBadge: some View {
-        switch controller.phase {
-        case .pairing:
-            ProgressView()
-        case .online:
-            Text("Online").font(.caption).foregroundStyle(.green)
-        case .connecting:
-            ProgressView()
-        case .streaming:
-            Text("Streaming").font(.caption).foregroundStyle(.green)
-        case .ended(let reason):
-            Text(reason).font(.caption).foregroundStyle(.orange).lineLimit(1)
-        case .idle:
-            EmptyView()
-        }
-    }
-
-    private func hostsFor(_ instance: Instance) -> [Host] {
-        // The pool is per instance on the server, so hosts are shown under the
-        // instance that is currently connected.
-        guard controller.phase == .online || controller.phase.isStreaming else { return [] }
-        return controller.hosts
-    }
-
-    private func icon(for platform: String) -> String {
-        switch platform {
-        case "macos": return "macbook"
-        case "windows": return "pc"
-        case "linux": return "server.rack"
-        default: return "desktopcomputer"
-        }
-    }
-
-    private func relative(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-
-    private var streamingBinding: Binding<Bool> {
-        Binding(
-            get: { controller.phase.isStreaming },
-            set: { _ in }
-        )
-    }
-
-    private var errorBinding: Binding<Bool> {
-        Binding(
-            get: { controller.lastError != nil && !controller.phase.isStreaming },
-            set: { _ in controller.lastError = nil }
-        )
+        .padding(14)
+        .frame(maxWidth: 480)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }

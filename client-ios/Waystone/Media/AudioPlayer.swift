@@ -2,242 +2,206 @@ import AVFoundation
 import AudioToolbox
 import Foundation
 
-/// Low latency Opus playback through `AVAudioEngine`.
+/// Opus playback with a small jitter buffer.
 ///
-/// The decoded audio is fed as PCM into an `AVAudioSourceNode` so the phone can
-/// keep its own jitter buffer at 20–30 ms, instead of the 150 ms default of
-/// `AVAudioPlayer`.
+/// Packets are decoded with the system Opus decoder as they arrive and the PCM
+/// goes into a ring buffer that the audio engine drains. The buffer is capped
+/// at `maxBuffered` so latency cannot creep up; when it overflows, the oldest
+/// audio is dropped.
+///
+/// The session category follows design doc 5.1: by default `.ambient`, which
+/// obeys the ring/silent switch, so opening a stream in a quiet office stays
+/// silent. Turning sound on explicitly switches to `.playback`.
 final class AudioPlayer {
     private let engine = AVAudioEngine()
-    private var converter: AudioConverterRef?
-    private var sourceNode: AVAudioSourceNode?
-    private var ring = RingBuffer(capacity: 48_000)
-    private let lock = NSLock()
+    private let decoder: OpusDecoder?
+    private let ring = SampleRing(capacity: 48_000 / 10 * 2)  // 100 ms stereo
+    private var started = false
 
-    /// True while audio is muted because the phone is on silent mode.
-    private(set) var isMuted = false
+    static let sampleRate = 48_000.0
 
-    init() {}
-
-    deinit {
-        engine.stop()
-        if let converter {
-            AudioConverterDispose(converter)
-        }
+    init() {
+        decoder = OpusDecoder()
     }
 
-    /// Starts the audio session and the engine.
-    func start() throws {
+    deinit { stop() }
+
+    /// `forceSound` plays even when the phone is on silent.
+    func start(forceSound: Bool) {
+        guard !started, decoder != nil else { return }
         let session = AVAudioSession.sharedInstance()
-        // `.playback` keeps the stream going when the ringer switch is silent,
-        // which is why the mute decision is taken explicitly by the UI instead.
-        try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
-        try session.setPreferredSampleRate(48_000)
-        try session.setPreferredIOBufferDuration(0.02)
-        try session.setActive(true)
-
-        isMuted = session.outputVolume == 0
-
-        guard let converter = makeConverter() else {
-            throw NSError(domain: "waystone.audio", code: -1)
+        do {
+            try session.setCategory(forceSound ? .playback : .ambient, mode: .default, options: [.mixWithOthers])
+            try session.setPreferredSampleRate(Self.sampleRate)
+            try session.setPreferredIOBufferDuration(0.01)
+            try session.setActive(true)
+        } catch {
+            Log.media.error("audio session: \(error.localizedDescription)")
         }
-        self.converter = converter
 
-        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false)!
-        let node = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList in
-            guard let self else { return noErr }
-            let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            let frames = Int(frameCount)
-            let samples = self.ring.read(count: frames * 2)
-            for channel in 0..<buffers.count {
-                guard let data = buffers[channel].mData?.assumingMemoryBound(to: Float.self) else { continue }
-                for frame in 0..<frames {
-                    let index = frame * 2 + min(channel, 1)
-                    data[frame] = index < samples.count ? samples[index] : 0
-                }
-            }
+        let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2)!
+        let ring = self.ring
+        let node = AVAudioSourceNode(format: format) { _, _, frameCount, bufferList in
+            let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+            guard buffers.count >= 2,
+                let left = buffers[0].mData?.assumingMemoryBound(to: Float.self),
+                let right = buffers[1].mData?.assumingMemoryBound(to: Float.self)
+            else { return noErr }
+            ring.readDeinterleaved(left: left, right: right, frames: Int(frameCount))
             return noErr
         }
-        sourceNode = node
         engine.attach(node)
         engine.connect(node, to: engine.mainMixerNode, format: format)
-        engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+            started = true
+        } catch {
+            Log.media.error("audio engine: \(error.localizedDescription)")
+        }
     }
 
     func stop() {
+        guard started else { return }
+        started = false
         engine.stop()
-        if let node = sourceNode {
-            engine.detach(node)
-            sourceNode = nil
-        }
+        ring.clear()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    /// Enqueues one Opus packet for decoding and playback.
-    func enqueue(opus: [UInt8]) {
-        guard !opus.isEmpty else { return }
-        lock.lock()
-        let converter = self.converter
-        lock.unlock()
-        guard let converter else { return }
-
-        guard let pcm = decode(converter: converter, opus: opus) else { return }
-        lock.lock()
-        ring.write(pcm)
-        lock.unlock()
+    /// Switches between "follow the silent switch" and "always play".
+    func setForceSound(_ force: Bool) {
+        try? AVAudioSession.sharedInstance().setCategory(
+            force ? .playback : .ambient, mode: .default, options: [.mixWithOthers])
     }
 
-    /// Drops everything buffered, for example after a stall.
-    func flush() {
-        lock.lock()
-        ring.clear()
-        lock.unlock()
-    }
-
-    /// Mutes or unmutes without tearing the engine down.
     func setMuted(_ muted: Bool) {
-        isMuted = muted
         engine.mainMixerNode.outputVolume = muted ? 0 : 1
+        if muted { ring.clear() }
     }
 
-    private func makeConverter() -> AudioConverterRef? {
-        var source = AudioStreamBasicDescription(
-            mSampleRate: 48_000,
-            mFormatID: kAudioFormatOpus,
-            mFormatFlags: 0,
-            mBytesPerPacket: 0,
-            mFramesPerPacket: 960,
-            mBytesPerFrame: 0,
-            mChannelsPerFrame: 2,
-            mBitsPerChannel: 0,
-            mReserved: 0)
-        var destination = AudioStreamBasicDescription(
-            mSampleRate: 48_000,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 8,
-            mFramesPerPacket: 1,
-            mBytesPerFrame: 8,
-            mChannelsPerFrame: 2,
-            mBitsPerChannel: 32,
-            mReserved: 0)
-        var converter: AudioConverterRef?
-        guard AudioConverterNew(&source, &destination, &converter) == noErr else { return nil }
-        // Opus needs the identification header as a magic cookie.
-        var header = Self.opusHead()
-        _ = header.withUnsafeMutableBytes { raw -> OSStatus in
-            guard let base = raw.baseAddress else { return -1 }
-            return AudioConverterSetProperty(
-                converter!, kAudioConverterCompressionMagicCookie, UInt32(raw.count), base)
-        }
-        return converter
-    }
-
-    private func decode(converter: AudioConverterRef, opus: [UInt8]) -> [Float]? {
-        final class Box {
-            let packet: [UInt8]
-            var consumed = false
-            init(_ packet: [UInt8]) { self.packet = packet }
-        }
-        let box = Box(opus)
-        let context = Unmanaged.passUnretained(box).toOpaque()
-
-        var pcm = [Float](repeating: 0, count: 5760 * 2)
-        var frames: UInt32 = 5760
-        let bufferList = AudioBufferList.allocate(maximumBuffers: 1)
-        defer { free(bufferList.unsafeMutablePointer) }
-
-        let status: OSStatus = pcm.withUnsafeMutableBytes { raw -> OSStatus in
-            bufferList[0] = AudioBuffer(
-                mNumberChannels: 2,
-                mDataByteSize: UInt32(raw.count),
-                mData: raw.baseAddress)
-            return AudioConverterFillComplexBuffer(
-                converter,
-                { _, ioPackets, ioData, _, refcon in
-                    guard let refcon else {
-                        ioPackets.pointee = 0
-                        return noErr
-                    }
-                    let box = Unmanaged<Box>.fromOpaque(refcon).takeUnretainedValue()
-                    if box.consumed {
-                        ioPackets.pointee = 0
-                        return noErr
-                    }
-                    box.consumed = true
-                    ioPackets.pointee = 1
-                    let destination = UnsafeMutableAudioBufferListPointer(ioData)
-                    box.packet.withUnsafeBytes { raw in
-                        destination[0].mData = UnsafeMutableRawPointer(mutating: raw.baseAddress)
-                        destination[0].mDataByteSize = UInt32(box.packet.count)
-                        destination[0].mNumberChannels = 2
-                    }
-                    return noErr
-                },
-                context,
-                &frames,
-                bufferList.unsafeMutablePointer,
-                nil)
-        }
-        guard status == noErr, frames > 0 else { return nil }
-        return Array(pcm.prefix(Int(frames) * 2))
-    }
-
-    /// Minimal OpusHead for 48 kHz stereo.
-    private static func opusHead() -> [UInt8] {
-        var head: [UInt8] = Array("OpusHead".utf8)
-        head.append(1)  // version
-        head.append(2)  // channels
-        head.append(contentsOf: [0x38, 0x01])  // pre-skip, 312 samples
-        head.append(contentsOf: [0x80, 0xBB, 0x00, 0x00])  // input sample rate, 48000
-        head.append(contentsOf: [0x00, 0x00])  // output gain
-        head.append(0)  // channel mapping family
-        return head
+    /// Decodes one packet; called on the transport thread.
+    func enqueue(_ packet: UnsafeBufferPointer<UInt8>) {
+        guard started, let decoder else { return }
+        decoder.decode(packet) { ring.write(interleaved: $0, frames: $1) }
     }
 }
 
-/// Lock protected float ring buffer.
-final class RingBuffer {
-    private var storage: [Float]
-    private var readIndex = 0
-    private var writeIndex = 0
-    private var count = 0
-    private let capacity: Int
+/// The system Opus decoder behind `AudioConverter`.
+private final class OpusDecoder {
+    private var converter: AudioConverterRef?
+    private var output = [Float](repeating: 0, count: 5760 * 2)
 
-    init(capacity: Int) {
-        self.capacity = capacity
-        self.storage = [Float](repeating: 0, count: capacity)
+    init?() {
+        var input = AudioStreamBasicDescription(
+            mSampleRate: AudioPlayer.sampleRate, mFormatID: kAudioFormatOpus, mFormatFlags: 0,
+            mBytesPerPacket: 0, mFramesPerPacket: 960, mBytesPerFrame: 0, mChannelsPerFrame: 2,
+            mBitsPerChannel: 0, mReserved: 0)
+        var pcm = AudioStreamBasicDescription(
+            mSampleRate: AudioPlayer.sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 8, mFramesPerPacket: 1, mBytesPerFrame: 8, mChannelsPerFrame: 2,
+            mBitsPerChannel: 32, mReserved: 0)
+        guard AudioConverterNew(&input, &pcm, &converter) == noErr else { return nil }
     }
 
-    func write(_ samples: [Float]) {
-        for sample in samples {
-            storage[writeIndex] = sample
-            writeIndex = (writeIndex + 1) % capacity
+    deinit {
+        if let converter { AudioConverterDispose(converter) }
+    }
+
+    /// Calls `sink` with interleaved stereo floats and the frame count.
+    func decode(_ packet: UnsafeBufferPointer<UInt8>, sink: (UnsafePointer<Float>, Int) -> Void) {
+        guard let converter, let base = packet.baseAddress, !packet.isEmpty else { return }
+        var source = PacketSource(data: UnsafeMutableRawPointer(mutating: base), size: UInt32(packet.count))
+        var frames = UInt32(output.count / 2)
+        let status: OSStatus = output.withUnsafeMutableBufferPointer { pcm in
+            var list = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(
+                    mNumberChannels: 2, mDataByteSize: UInt32(pcm.count * 4), mData: pcm.baseAddress))
+            return AudioConverterFillComplexBuffer(converter, PacketSource.supply, &source, &frames, &list, nil)
+        }
+        guard status == noErr || source.consumed, frames > 0 else { return }
+        output.withUnsafeBufferPointer { sink($0.baseAddress!, Int(frames)) }
+    }
+
+    /// Hands the converter exactly one packet, with the description that
+    /// variable-bitrate input requires.
+    private struct PacketSource {
+        var data: UnsafeMutableRawPointer
+        var size: UInt32
+        var consumed = false
+        var description = AudioStreamPacketDescription()
+
+        static let supply: AudioConverterComplexInputDataProc = { _, packets, buffers, descriptions, user in
+            let source = user!.assumingMemoryBound(to: PacketSource.self)
+            guard !source.pointee.consumed else {
+                packets.pointee = 0
+                // Any non-zero status ends this fill call without an error.
+                return 1
+            }
+            source.pointee.consumed = true
+            packets.pointee = 1
+            buffers.pointee.mNumberBuffers = 1
+            buffers.pointee.mBuffers.mData = source.pointee.data
+            buffers.pointee.mBuffers.mDataByteSize = source.pointee.size
+            buffers.pointee.mBuffers.mNumberChannels = 2
+            source.pointee.description = AudioStreamPacketDescription(
+                mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: source.pointee.size)
+            let offset = MemoryLayout<PacketSource>.offset(of: \PacketSource.description)!
+            descriptions?.pointee = UnsafeMutableRawPointer(source).advanced(by: offset)
+                .assumingMemoryBound(to: AudioStreamPacketDescription.self)
+            return noErr
+        }
+    }
+}
+
+/// Interleaved stereo ring buffer shared by the decoder thread and the
+/// real-time audio thread. The lock is held for a few hundred copies at most.
+private final class SampleRing {
+    private var storage: [Float]
+    private var read = 0
+    private var count = 0
+    private let lock = NSLock()
+
+    init(capacity: Int) {
+        storage = [Float](repeating: 0, count: capacity)
+    }
+
+    func write(interleaved samples: UnsafePointer<Float>, frames: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        let capacity = storage.count
+        for index in 0..<(frames * 2) {
+            storage[(read + count) % capacity] = samples[index]
             if count < capacity {
                 count += 1
             } else {
-                // Overflow: drop the oldest sample so the latency stays bounded.
-                readIndex = (readIndex + 1) % capacity
+                read = (read + 1) % capacity
             }
         }
     }
 
-    /// Reads up to `count` samples, zero padding when the buffer runs dry.
-    func read(count wanted: Int) -> [Float] {
-        var output = [Float](repeating: 0, count: wanted)
-        let available = min(wanted, count)
-        for index in 0..<available {
-            output[index] = storage[(readIndex + index) % capacity]
+    func readDeinterleaved(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frames: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        let capacity = storage.count
+        for frame in 0..<frames {
+            if count >= 2 {
+                left[frame] = storage[read]
+                right[frame] = storage[(read + 1) % capacity]
+                read = (read + 2) % capacity
+                count -= 2
+            } else {
+                left[frame] = 0
+                right[frame] = 0
+            }
         }
-        readIndex = (readIndex + available) % capacity
-        count -= available
-        return output
     }
 
     func clear() {
-        readIndex = 0
-        writeIndex = 0
+        lock.lock()
+        read = 0
         count = 0
+        lock.unlock()
     }
 }
