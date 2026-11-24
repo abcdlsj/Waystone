@@ -1,181 +1,142 @@
 # Waystone 开发进度
 
-> 面向接手者的现状说明。设计口径以 [`design.md`](design.md) 为准，本文件只讲**已经落地的代码、验证方式、已知问题、下一步**。
->
-> 最后更新：见 git log `HEAD`。
+> 面向接手者的现状说明。产品口径以 [`design.md`](design.md) 为准，最近一次验收见 [`ACCEPTANCE.md`](ACCEPTANCE.md)。本文件只讲已经落地的代码、怎么验证、还缺什么。
 
-## 1. 一句话状态
+## 1. 状态
 
-端到端全链路已跑通：设备配对 → 信令 → WebRTC 协商 → 媒体双向传输 → **iOS 上屏**（在 iOS 模拟器上实测出画面）。Windows 被控端尚未开始。
+macOS 被控端 + iOS 控制端 + 自部署服务端的 MVP 闭环已完成：
+
+- 配对、信令、WebRTC（直连优先，TURN 兜底）、音视频、双轨输入都已实现。
+- 设计文档 5.2–5.4 的手势、热键、悬浮球和弱网处理也已实现。
+- 在模拟器上有一条端到端 UI 验收用例。
+
+Windows 被控端未开始。
 
 ## 2. 仓库结构
 
 ```
-crates/waystone-proto    协议层：设备身份、输入帧、配对 URI、信令消息（无重依赖，iOS 也编）
-crates/waystone-rtc      WebRTC 引擎：str0m 驱动 + 自写 STUN + sans-io TURN + C ABI
-crates/waystoned         自部署服务端：SQLite + HTTPS 面板 + WSS 信令 + 内嵌 TURN
-host/macos/waystone-host macOS 被控端：ScreenCaptureKit + VideoToolbox + CoreGraphics 输入注入
-client-ios               iOS 控制端：SwiftUI + Metal + VideoToolbox 硬解 + Opus 播放
-docs/design.md           原始设计文档（中文，产品口径）
+crates/waystone-proto     协议：设备身份、配对链接、JSON 信令、二进制输入帧（HID 键码）
+crates/waystone-rtc       传输：str0m 单所有者引擎 + sans-io STUN/TURN + C ABI（iOS 与 macOS 共用）
+crates/waystoned          服务端：HTTPS 面板 + WSS 信令 + 内嵌 TURN + SQLite
+host/macos/waystone-host  macOS 被控端：Rust 主体 + Swift 静态库（采集/编码/注入/系统）
+client-ios                iOS 控制端：SwiftUI + VideoToolbox + Metal + AVAudioEngine
+docs/                     设计文档、本文件、验收报告与截图
 ```
 
-技术栈偏离设计文档的唯一一处：**iOS 用原生 Swift 而非 Flutter**（已与需求方确认）。原因：音视频本来就必须绕开 Flutter 走原生，且 Flutter 会额外引入 1.2GB SDK + Pod 链路。
+偏离设计文档的地方：iOS 用原生 Swift，不用 Flutter（已与需求方确认）。音视频本来就必须走原生，Flutter 只会多一层桥接。
 
-## 3. 已完成的模块
+## 3. 模块
 
-### 3.1 `waystone-proto`（14 个单测）
-
-- `device.rs`：`DeviceId` 由 Ed25519 公钥派生（`sha256(pubkey)[..16]`），`Role`/`Platform`/`Viewport`
-- `identity.rs`：挑战签名载荷格式 `waystone-auth-v1|<server_id>|<nonce>`，与 iOS `CryptoKit` 逐字节一致
-- `input.rs`：手写二进制输入帧（鼠标移动/按键/滚轮/键盘/文本/释放全部/虚拟手柄），`input-fast`（不可靠无序）与 `input-reliable`（可靠有序）分流
-- `pairing.rs`：`waystone://pair?ep=…&turn=…&fp=…&tk=…` 解析与渲染，IPv6 端点支持
-- `signal.rs`：JSON 信令（`type` 为 tag），配对/认证/会话/ICE/退出/控制全量
-
-### 3.2 `waystone-rtc`（17 单测 + 2 端到端 + 3 FFI）
-
-- `engine.rs`：**单所有者驱动**。str0m 要求「每次 mutation 后必须 poll 到 Timeout」，所以 `Rtc` 只被一个 task 持有，外部只发命令、只收回调，不可能破坏该不变量
-  - 候选收集：host（全部物理网卡，跳过隧道）/ srflx（自写 STUN）/ relay（TURN）
-  - 候选集与现实对齐：只通告与 socket 同族的地址（绑 `0.0.0.0` 就不会出现 IPv6 候选），并剔除以本机为源发不出去的地址（例如 macOS 上某 VM 网桥把自己子网的网络地址当成接口地址，发往它会 `EADDRNOTAVAIL`）
-  - `net.rs`：从 `recvmsg` 辅助数据读目的地址——通配 socket 必须回填目的地址，否则 ICE 会把所有连通性检查当作非法丢弃（这是之前黑屏的主因之一）
-  - 中继回退时自动把视频码率钳到 `relay_bitrate_ceiling`
-  - `Event::FrameDropped`：会话未就绪时丢帧会通知宿主重试关键帧
-- `stun.rs`：RFC 5389 编解码（XOR 地址、长期凭据、`MESSAGE-INTEGRITY`、`FINGERPRINT`），类型编码对齐 RFC 表格
-- `turn.rs`：sans-io TURN 分配状态机（401 挑战 → Allocate → ChannelBind → Refresh），不持有 socket，因此能与 ICE 共用同一个 UDP 端口
-- `ffi.rs`：C ABI（控制事件走 JSON，媒体事件走 16 字节头 + 裸载荷），iOS 与 macOS 共用同一份 ICE/DTLS/RTP 实现
-
-### 3.3 `waystoned`（16 单测 + 3 信令集成 + 1 全链路端到端）
-
-单二进制，两个端口：
-
-- `TCP 8443`：HTTPS 面板（配对二维码、设备列表）+ `/ws` 信令
-- `UDP 3478`：内嵌 STUN/TURN
+### 3.1 `waystone-proto`
 
 | 文件 | 职责 |
 |---|---|
-| `instance.rs` | 首次启动生成自签证书 + 稳定 `server_id`，私钥 0600；指纹供客户端固定 |
-| `store.rs` | SQLite（WAL、busy_timeout）：实例、设备池、一次性配对令牌。令牌与角色绑定，手机无法把自己注册成 host |
-| `challenge.rs` | 每连接 nonce（60s TTL、用后即焚）+ Ed25519 验签 |
-| `hub.rs` | 设备注册表、会话路由、双向 teardown 通知；同一设备重连踢掉旧连接 |
-| `turnserver.rs` | 内嵌 TURN，coturn `use-auth-secret` 兼容凭据（服务端不存每客户端密码） |
-| `auth.rs` | 首次访问设置管理员口令（一次性 claim）、Argon2id、服务端会话 + `HttpOnly; Secure; SameSite=Strict` cookie |
-| `http.rs` | 面板、`/api/{status,pair,devices}`（需登录）、同源校验、WSS 升级（认证超时、ping/RTT、64 KiB 上限） |
-| `lan.rs` | 未指定 `--endpoint` 时自动选主 LAN IPv4 |
+| `device.rs` | `DeviceId`（Ed25519 公钥派生）、`Role`、`Platform`、`Viewport`、`VideoCodec` |
+| `identity.rs` | 挑战签名载荷 `waystone-auth-v1\|<server_id>\|<nonce>`，与 iOS CryptoKit 逐字节一致 |
+| `pairing.rs` | `waystone://pair?ep=…&turn=…&fp=…&tk=…` 解析与生成 |
+| `signal.rs` | JSON 信令；`busy`、`relay_bitrate_ceiling`、`ByeReason` 等 |
+| `input.rs` | 输入帧编解码；`keys` 模块是 HID usage 常量；鼠标移动走不可靠通道，其余走可靠通道 |
 
-`tests/end_to_end.rs` 是本仓库最有价值的测试：真实 HTTPS/WSS 服务端 + 真实两端引擎，跑完 配对→认证→SessionStart→SDP/ICE 交换→HEVC 帧→输入帧→挂断 全链路。
+### 3.2 `waystone-rtc`
 
-### 3.4 `host/macos/waystone-host`（12 单测）
+- `engine.rs`：`Rtc` 只由一个任务持有，外部只发命令、只收事件。str0m 要求每次修改状态后都要 poll 到超时，这样安排就不可能违反这条规则。负责收集候选（host / srflx / relay），并有仅中继模式。走中继时把码率钳到上限。
+- `net.rs`：从 `recvmsg` 辅助数据读出目的地址。绑定 `0.0.0.0` 的 socket 不这样做，ICE 会把连通性检查当成非法包丢掉。
+- `stun.rs`、`turn.rs`：RFC 5389 编解码；TURN 分配状态机不持有 socket，所以能和 ICE 共用一个 UDP 端口。
+- `ffi.rs`：C ABI。控制事件用 JSON，媒体事件用 16 字节头加原始载荷；`ws_engine_stop` 返回后不再有回调。
 
-- `swift/Capture.swift`（build.rs 调 swiftc 编成静态库）：
-  - ScreenCaptureKit 采集（NV12，IO 表面直通）
-  - VideoToolbox 编码：**HEVC 与 H.264 都支持**（codec 由控制端在会话开始时指定），`RealTime`、禁 B 帧、`MaxKeyFrameInterval=0`、无 look-ahead
-  - AVCC → Annex-B 转换，每个关键帧前置参数集（HEVC 的 VPS/SPS/PPS 或 H.264 的 SPS/PPS）
-  - AudioToolbox Opus（48kHz 立体声，20ms 帧长）；设备自带的 Opus 编码器，无外部依赖
-  - **缓存最后一帧并在需要时重编码**：ScreenCaptureKit 只在画面变化时出帧，静态桌面下新接入的观众会永远等不到画面，这是必须的补偿
-  - CoreGraphics 输入注入，含 `ReleaseAll` 兜底（断连不会留下卡住的 Ctrl）
-  - 电源断言：显示器休眠时 SCK 报告 0 个显示器，会话直接失败
-- `src/signal.rs`：指纹固定（不走 CA 链）的 WSS 客户端
-- `src/config.rs`：设备密钥、配置持久化（0600）
-- 采集起点是「收到控制端 offer」而不是「服务端分配会话」：SCK 与编码器起来要一秒左右，之前会话可能先来 30 秒（模拟器冷启动实测），这段时间编出来的帧全被引擎丢掉，纯烧 CPU
-- 编码分辨率跟着控制端屏幕走（`stream_plan`）：把桌面塞进控制端画面所在的矩形，允许超过本机 `--capture`（真机是 Retina，采集层是从面板像素降采样，所以按控制端尺寸出流才是 1:1），上限 2 倍并再被 Swift 侧按面板点数 ×2 夹一次。码率按像素数等比缩放（3 Mbps 下限 / 16 Mbps 上限）
-- 编码器尺寸必须与 SCK 实际交付的尺寸一致，否则 VideoToolbox 会替每帧做一次重采样，画面白白变糊（之前就是 2144x1206 的会话配 1512x850 的帧）
-- 关键帧请求做了 250ms 去抖：`Connected`、两次 `MediaReady`、控制端 PLI 会在几毫秒内同时到达，之前每来一个就重编码一次缓存帧，连发三个 200KB 的突发正好是那种看得见的卡顿
-- CLI：`pair <uri>` / `run` / `status` / `capture-test`（`capture-test` 用于在配对前验证录屏权限）
-- 排障开关：`WAYSTONE_DUMP_FRAMES=<dir>` 把编码后的前 40 帧（`.h264`/`.h265`）落盘，可在 App 之外复现解码问题
+### 3.3 `waystoned`
 
-### 3.5 `client-ios`（11 个单测）
+| 文件 | 职责 |
+|---|---|
+| `instance.rs` / `tls.rs` | 首次启动生成自签证书和 `server_id`，私钥 0600；客户端固定证书指纹 |
+| `store.rs` | SQLite（WAL）：实例、设备、一次性配对令牌（单条 `UPDATE … RETURNING` 消费） |
+| `auth.rs` | 管理员口令一次性认领，Argon2id，`HttpOnly; Secure; SameSite=Strict` cookie |
+| `http.rs` | 面板、`/api/*`、同源校验、WSS（认证超时、ping/RTT、64 KiB 上限、慢客户端断开） |
+| `hub.rs` | 设备注册、会话路由、占用检查、参与者校验、吊销踢线 |
+| `turnserver.rs` | 内嵌 TURN，coturn `use-auth-secret` 兼容凭据，检查过期，拒绝中继到回环地址 |
+| `lan.rs` | 未指定 `--endpoint` 时自动选择主 LAN IPv4 |
+| `pairing.rs` | 一次性令牌、配对链接与二维码 |
+| `main.rs` | `waystoned pair --role host\|controller`：直接从数据目录生成配对链接 |
 
-- 首页（设备池 + 扫码 + 粘贴兜底）、串流页（Metal 层 + 手势 + 悬浮球 + 三套胶囊 + 状态胶囊）
-- `GestureEngine`：设计文档里「点按 / 滑移悬停 / 停顿拖拽 / 双指右键」状态机，9 个单测覆盖每个分支（尤其「悬停后抬手绝不点击」这条防误出牌的规则）
-- `VideoDecoder`：Annex-B → AVCC + `CMFormatDescription`（按 codec 选 HEVC / H.264 的构造器），解码直出 Metal
-- `VideoDecoder` 的解码调用不能再传 per-frame `outputHandler`：会话创建时已经注册了 output callback，两者同时给会让 VideoToolbox 对每一帧返回 `kVTParameterErr`(-12902)，表现就是「收到关键帧但画面永远黑」
-- `AudioPlayer`：`AVAudioEngine` + 自建 20ms 环形缓冲
-- `SignalingClient`：`URLSessionWebSocketTask` + 证书指纹固定
-- codec 自适应：`VTIsHardwareDecodeSupported(HEVC)` 决定协商 HEVC 还是 H.264（模拟器无 HEVC 解码器），并通过 `session_start.video_codec` 告诉被控端该编哪种码
-- 解码有背压：在途帧超过 2 帧就跳过非关键帧（关键帧例外），否则解码慢一点就会把队列越堆越长，表现为「不卡但延迟越来越大」。跳过数、解码数、收包数每秒打一条 DEBUG 日志（`waystone: rx +N/s decoded +N/s dropped +N/s`），用来区分「网络慢 / 解码慢 / 渲染慢」
+部署见 `crates/waystoned/README.md` 和 `Dockerfile`。
 
-### 3.6 视频 codec 的一次会话内协商
+### 3.4 macOS 被控端
 
-被控端负责编码，但它无法知道自己对面能解什么码，所以控制端在 `session_start` 里带上 `video_codec`（`h265` / `h264`），服务端原样回显在双方的 `session_accepted` 里。被控端据此同时决定 SDP 和 VideoToolbox 的编码格式，两者必须一致，否则就是「有声音、画面永远黑」。字段可缺省，缺省时被控端退回本地配置的 `codec`。
+| 文件 | 职责 |
+|---|---|
+| `main.rs` | CLI：`pair <uri> [--name]`、`run [--no-lock] [--no-mute]`、`status`、`capture-test` |
+| `agent.rs` | 信令连接、退避重连、一次只服务一个会话 |
+| `session.rs` | 会话生命周期：`start` / `on_signal` / `on_control` / `finish`；10 秒重连窗口；关键帧请求间隔 250 ms，晚到的推迟执行，不丢弃 |
+| `capture.rs` | 屏幕采集句柄，Drop 时停止 |
+| `plan.rs` | 编码尺寸与码率：保持桌面宽高比，不超过面板像素，长边最大 3840，码率按像素数 × 帧率 |
+| `input.rs` / `keymap.rs` | 注入线程：最短按住 15 ms、连击计数、修饰键、全部释放；HID 到 macOS 虚拟键码 |
+| `system.rs` | 显示器、锁屏、扬声器静音守卫、辅助功能权限检查 |
+| `config.rs` | 设备密钥与配置（0600 原子写入）；`locks_after` 决定哪些断开原因要锁屏 |
+| `swift/` | ScreenCaptureKit 采集（静止 500 ms 后以 5 fps 保活）、VideoToolbox H.264/HEVC、AudioToolbox Opus、CGEvent 注入、系统调用 |
 
-## 4. 验证方式（接手者请照做）
+断开时的收尾顺序固定为：释放输入 → 停采集 → 关引擎 → 恢复扬声器 → 按原因锁屏。用户主动挂断和主机出错不锁屏，网络超时和对端离线按配置 `lock_on_disconnect` 决定，「断开并锁屏」一定锁屏。
+
+### 3.5 iOS 控制端
+
+分层与各层职责见 [`ACCEPTANCE.md`](ACCEPTANCE.md) 2.2 节。扩展点：
+
+- **新热键预设**：在 `Input/HotkeyPreset.swift` 加一个静态常量并放进 `all`，不用改视图代码。
+- **新触控方式**：实现 `TouchEngine` 协议，在 `InputController.makeEngine` 里加一个分支。
+- **新信令消息**：`Protocol/Wire.swift` 加一个 case；会话相关的消息由 `PoolConnection` 按会话 id 转给 `SessionMessageHandler`。
+
+codec 协商：控制端用 `VTIsHardwareDecodeSupported` 判断能否硬解 HEVC（模拟器不能），然后在 `session_start.video_codec` 里告诉被控端。被控端据此同时决定 SDP 和编码器。
+
+## 4. 验证
 
 ```bash
-# 全量测试（约 10 秒）
-cargo test --workspace
+cargo test --workspace                       # 123 个，约 10 秒
+cargo clippy --workspace --all-targets       # 0 警告
+cargo fmt --all --check
 
-# 静态检查（当前 0 warning）
-cargo clippy --workspace --all-targets
-
-# 启动服务端
-cargo run -p waystoned -- --data-dir /tmp/wsdata --listen 0.0.0.0:8443 \
-  --endpoint <本机IP>:8443 --no-turn
-
-# 生成配对 URI（直接读数据目录，无需管理员口令；服务端需至少启动过一次）
-cargo run -p waystoned -- pair --role host --data-dir /tmp/wsdata
-cargo run -p waystoned -- pair --role controller --data-dir /tmp/wsdata
-
-# 被控端配对并运行
-cargo run -p waystone-host -- --state-dir /tmp/wsstate pair "<waystone://pair?...>"
-cargo run -p waystone-host -- --state-dir /tmp/wsstate run
-
-# 先在无会话状态下验证录屏权限（会输出采集到的帧数）
-cargo run -p waystone-host -- --state-dir /tmp/wsstate capture-test --seconds 3
-
-# iOS（xcodegen + 预先构建 Rust 静态库）
-cd client-ios && ./scripts/build-rust.sh debug
+cd client-ios
+scripts/build-rust.sh release                # 生成 Vendor/WaystoneRTC.xcframework
 xcodegen generate
-xcodebuild -project Waystone.xcodeproj -scheme Waystone \
-  -sdk iphonesimulator -destination 'platform=iOS Simulator,name=<设备名>' build
-xcodebuild test -project Waystone.xcodeproj -scheme Waystone \
-  -sdk iphonesimulator -destination 'platform=iOS Simulator,name=<设备名>'
-# 模拟器无法扫码，用环境变量注入配对 URI（仅 DEBUG 生效）
-SIMCTL_CHILD_WAYSTONE_PAIR_URI="waystone://pair?..." \
-SIMCTL_CHILD_WAYSTONE_AUTO_CONNECT=1 xcrun simctl launch <设备> dev.waystone.app
+xcodebuild -scheme Waystone -destination 'platform=iOS Simulator,name=<模拟器>' test   # 32 个单测
 ```
 
-排障要点：`cargo run -p waystone-host -- run` 是长期进程，会话结束后仍在；换服务端实例（指纹变化）必须重装模拟器 App（`simctl uninstall`），否则 App 里存的实例会因指纹不匹配连不上。
+端到端验收（需要先启动服务端和被控端）见 [`ACCEPTANCE.md`](ACCEPTANCE.md) 3.1 节。
 
-## 5. 已知问题（按优先级）
+模拟器不能扫码，DEBUG 构建支持两种注入配对链接的方式：
 
-### 已修复：iOS 收到首帧后画面仍黑
+- 环境变量 `WAYSTONE_PAIR_URI`（加 `WAYSTONE_AUTO_CONNECT=1` 会自动连第一台主机）。
+- 文件 `Application Support/Waystone/pair.txt`。
 
-当时的现象是「主机侧 `media ready`、帧已发出，iOS 侧 `transport connected`、收到音频包/首帧，随后再无画面，几十秒后会话超时」。实测定位到三个独立原因，均已修复并在模拟器上看到画面：
+排障：
 
-1. **codec 无人对接**：主机只按本地 `config.codec`（默认 `h265`）配编码器和 SDP，而模拟器只有 H.264 解码器，于是主机侧报 `Hevc is not negotiated for Mid(...)` 丢光所有帧。现在由控制端在 `session_start.video_codec` 里指定，主机同时切换编码器与 SDP（见 3.6）。
-2. **解码调用参数非法**：iOS 侧 `VTDecompressionSession` 创建时已注册 output callback，却还在 `VTDecompressionSessionDecodeFrame` 传 per-frame `outputHandler`，VideoToolbox 对每帧返回 `kVTParameterErr`(-12902)。改为 `frameRefcon: nil` 后正常出帧，并加了真实码流的回归测试（`client-ios/WaystoneTests/VideoDecoderTests.swift`）。此 bug 与 codec 无关，HEVC 同样中招。
-3. **候选集不收敛**：绑 `0.0.0.0` 时还在通告 IPv6 候选（该 socket 发不出去 IPv6），以及本机作为源发不出去的地址（某 VM 网桥把子网网络地址当接口地址，发往它 `EADDRNOTAVAIL`）。现在按 socket 地址族过滤，并用零长报文探测可用性。
+- 换了服务端数据目录，证书指纹就会变化。这时要在 App 首页用「移除此服务器」删掉旧服务器，或卸载 App。
+- 被控端加 `RUST_LOG=waystone_host=debug` 会逐条打印收到的输入事件。
+- `WAYSTONE_DUMP_FRAMES=<dir>` 会把编码后的前 40 帧写到磁盘。
+- iOS 的 DEBUG 构建每 2 秒打印一次收包数、解码数和跳帧数（`dev.waystone.app` / `session` 分类）。
 
-### P1 — 未实现（设计文档要求，MVP 范围内）
+## 5. 还缺什么
+
+### MVP 范围内
 
 | 项 | 说明 |
 |---|---|
-| Windows 被控端 | 完全未开始。含 Session 0 服务 + 用户态采集进程、DXGI Desktop Duplication、NVENC/AMF/oneVPL、WASAPI loopback、UAC/锁屏桌面切换、IddCx 虚拟屏、断连锁屏还原 |
-| IddCx 虚拟显示器 | macOS 端未做（用真实屏幕尺寸），Windows 端未做 |
-| 中继限速实测 | 代码已实现（`relay_bitrate_ceiling`），但未在真实 TURN 路径上验证 |
-| 静音接管 | 设计文档要求会话时把被控端物理声卡静音；未实现 |
-| 自动锁屏 | 会话结束时锁屏；macOS 未实现 |
-| 音频静音联动 | iOS 侧静音开关已做，被控端静音未做 |
-| 敏锐度校准 | 手势阈值（160ms / 8pt）未做真机调参，模拟器无法验证手感 |
-| 模拟器性能 | 模拟器的 Metal 与 60fps 大画面解码本身就是这台机器上最慢的一环；同样码流在真机上未测。若要在模拟器上判断「卡」是不是编码/网络造成的，看每秒的 `rx/decoded/dropped`：rx 稳在 55~60 且 dropped 很小就说明问题在渲染侧 |
-| 采集源分辨率 | 这台机器的 CG 面板是 1512x982 点（Retina 2 倍即 3024x1964），抓到的桌面细节上限就是面板像素；控制端可能仍然比它大，此时放大不可避免 |
+| Windows 被控端 | 未开始：Session 0 服务 + 用户态采集进程、DXGI、NVENC/AMF/oneVPL、WASAPI loopback、UAC / 锁屏桌面切换、IddCx。协议和传输层直接复用，分层照搬 `host/macos` |
+| 虚拟显示器 | macOS 用真实屏幕比例，画面加黑边 |
+| 真机调参 | 手势阈值（160 ms / 8 pt / 双指 200 ms）、触控板加速曲线只在模拟器上跑过 |
 
-### P2 — 工程化缺口
+### 工程化
 
-- `waystoned` 已有 Dockerfile（`crates/waystoned/Dockerfile`），无 systemd 单元
-- macOS 被控端只有 CLI，无 `.app` 打包、无 LaunchAgent
-- 无 CI（当前靠本地 `cargo test` / `xcodebuild`）
-- 无日志落盘与轮转（只有 stderr）
-- 设计文档里的 `/data` 目录约定未落实到默认路径
+- macOS 被控端只有 CLI，没有 `.app` 打包和 LaunchAgent。
+- 没有 CI。
+- 日志只输出到 stderr，不落盘，也不轮转。
+- 旧版本用 SHA-256 存的管理员口令无法登录，需要清空 `admin_token_hash` 后重新认领，没有迁移脚本。
+
+### 之后的阶段（设计文档第 7 节）
+
+手柄（ViGEm）、唤醒开机、游戏启动台、分享与桌面控制端，均未开始。
 
 ## 6. 代码约定
 
-- **代码 / 注释 / 文档 / commit message 一律英文**；只有 `docs/*.md` 可用中文
-- 每个模块落地即提交，commit 信息说明「为什么」而非「改了什么」
-- Rust 侧 `cargo fmt` + `cargo clippy --workspace --all-targets` 必须干净
-- 测试优先写在被测模块内部（`#[cfg(test)] mod tests`），跨模块才放 `tests/`
-
-## 7. 接手建议
-
-1. 先跑 `cargo test --workspace`、`crates/waystoned/tests/end_to_end.rs` 和 `client-ios` 的 `xcodebuild test`，理解全链路
-2. 用模拟器或真机跑一遍第 4 节的流程，确认「画面出现」这条基线
-3. Windows 被控端按 `host/macos` 的分层复制：`signal`（信令）/ `capture`（媒体）/ `input`（注入）三层，协议层完全复用 `waystone-proto` 与 `waystone-rtc`
+- 代码、注释、commit message 一律英文；只有 `docs/*.md` 可用中文。
+- commit message 说明「为什么改」。
+- Rust 侧 `cargo fmt` 和 `cargo clippy --workspace --all-targets` 必须干净。
+- 测试优先写在被测模块内（`#[cfg(test)] mod tests`），跨模块的才放 `tests/`。
