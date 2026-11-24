@@ -27,40 +27,13 @@ use waystone_proto::Viewport;
 use crate::stun::{self, class, method, Builder, Message};
 use crate::turn::{self, Progress as TurnProgress, TurnAllocation};
 
-/// Video codec to negotiate.
-///
-/// HEVC is the default and what every supported device decodes in hardware;
-/// H.264 exists as a fallback because a few environments (notably the iOS
-/// simulator and some old browsers) have no HEVC decoder at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VideoCodec {
-    Hevc,
-    H264,
-}
+pub use waystone_proto::VideoCodec;
 
-impl VideoCodec {
-    /// Parses the wire value used in the engine config.
-    pub fn parse(value: &str) -> VideoCodec {
-        match value.to_ascii_lowercase().as_str() {
-            "h264" | "avc" => VideoCodec::H264,
-            _ => VideoCodec::Hevc,
-        }
-    }
-
-    /// The str0m codec this maps to.
-    pub fn codec(self) -> Codec {
-        match self {
-            VideoCodec::Hevc => Codec::H265,
-            VideoCodec::H264 => Codec::H264,
-        }
-    }
-
-    /// Value used in the engine config and the FFI JSON.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            VideoCodec::Hevc => "h265",
-            VideoCodec::H264 => "h264",
-        }
+/// The str0m codec a [`VideoCodec`] maps to.
+fn str0m_codec(codec: VideoCodec) -> Codec {
+    match codec {
+        VideoCodec::H265 => Codec::H265,
+        VideoCodec::H264 => Codec::H264,
     }
 }
 
@@ -178,7 +151,7 @@ impl EngineConfig {
             stun: None,
             turn: None,
             bind: None,
-            video_codec: VideoCodec::Hevc,
+            video_codec: VideoCodec::H265,
             sink,
         }
     }
@@ -342,7 +315,7 @@ impl Driver {
         // no HEVC decoder at all). Opus is the only audio codec.
         let mut rtc_config = RtcConfig::new().clear_codecs();
         match config.video_codec {
-            VideoCodec::Hevc => rtc_config.codec_config().enable_h265(true),
+            VideoCodec::H265 => rtc_config.codec_config().enable_h265(true),
             VideoCodec::H264 => rtc_config.codec_config().enable_h264(true),
         }
         rtc_config.codec_config().enable_opus(true, false);
@@ -827,7 +800,7 @@ impl Driver {
             (self.config.sink)(Event::FrameDropped);
             return;
         };
-        let Some(pt) = self.payload_type(mid, self.config.video_codec.codec()) else {
+        let Some(pt) = self.payload_type(mid, str0m_codec(self.config.video_codec)) else {
             self.video_drop_logged += 1;
             if self.video_drop_logged <= 3 {
                 warn!(

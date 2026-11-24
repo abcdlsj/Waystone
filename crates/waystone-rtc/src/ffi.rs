@@ -96,7 +96,8 @@ struct StartConfig {
     /// Bind address; `0.0.0.0:0` by default.
     bind: Option<String>,
     /// `h265` (default) or `h264`.
-    video_codec: Option<String>,
+    #[serde(default)]
+    video_codec: VideoCodec,
 }
 
 #[derive(serde::Deserialize)]
@@ -212,10 +213,7 @@ unsafe fn start_inner(
         }
     });
 
-    let mut engine_config = EngineConfig::new(role, sink);
-    if let Some(codec) = &config.video_codec {
-        engine_config = engine_config.with_video_codec(VideoCodec::parse(codec));
-    }
+    let mut engine_config = EngineConfig::new(role, sink).with_video_codec(config.video_codec);
     if let Some(bind) = &config.bind {
         let address = bind
             .parse()

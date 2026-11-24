@@ -183,8 +183,8 @@ impl Capture {
         bitrate: u32,
         codec: &str,
     ) -> anyhow::Result<()> {
-        let tag = match waystone_rtc::VideoCodec::parse(codec) {
-            waystone_rtc::VideoCodec::Hevc => 0,
+        let tag = match codec.parse().unwrap_or_default() {
+            waystone_rtc::VideoCodec::H265 => 0,
             waystone_rtc::VideoCodec::H264 => 1,
         };
         let context = Arc::as_ptr(&self.bridge) as *mut c_void;

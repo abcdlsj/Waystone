@@ -137,6 +137,48 @@ impl FromStr for Platform {
     }
 }
 
+/// Video codec the host encodes and the controller decodes.
+///
+/// The host encodes, but only the controller knows what it can decode (an iOS
+/// simulator has no HEVC decoder, for instance), so the controller names the
+/// codec in `SessionStart` and the server echoes it to both ends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VideoCodec {
+    #[serde(rename = "h264")]
+    H264,
+    #[default]
+    #[serde(rename = "h265")]
+    H265,
+}
+
+impl VideoCodec {
+    /// Wire name, identical to the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VideoCodec::H264 => "h264",
+            VideoCodec::H265 => "h265",
+        }
+    }
+}
+
+impl fmt::Display for VideoCodec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for VideoCodec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "h264" | "avc" => Ok(VideoCodec::H264),
+            "h265" | "hevc" => Ok(VideoCodec::H265),
+            other => Err(format!("unknown video codec {other}")),
+        }
+    }
+}
+
 /// Public description of a paired device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {

@@ -25,7 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::device::{DeviceId, DeviceInfo, Viewport};
+use crate::device::{DeviceId, DeviceInfo, VideoCodec, Viewport};
 use crate::identity::Identity;
 use crate::PROTOCOL_VERSION;
 
@@ -83,13 +83,9 @@ pub enum ClientMessage {
         target: DeviceId,
         viewport: Viewport,
         audio: bool,
-        /// Codec the controller can decode (`h265` or `h264`).
-        ///
-        /// The host encodes, so only the controller knows which codec is
-        /// usable: an iOS simulator, for instance, has no HEVC decoder. The
-        /// field is optional so older controllers keep working.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        video_codec: Option<String>,
+        /// Codec the controller can decode; HEVC when omitted.
+        #[serde(default)]
+        video_codec: VideoCodec,
     },
     /// Relay an SDP/ICE message to the peer of an existing session.
     RtcSignal {
@@ -120,6 +116,9 @@ pub enum ByeReason {
     LockAndExit,
     /// The media path did not recover within the reconnection window.
     NetworkTimeout,
+    /// The peer's signaling connection dropped: the machine went offline, to
+    /// sleep, or lost its network.
+    PeerOffline,
     /// The host side failed, for example the capture process died.
     HostError,
 }
@@ -134,6 +133,11 @@ pub struct TurnCredentials {
     pub server: String,
     pub username: String,
     pub password: String,
+    /// Video bitrate ceiling, in bits per second, the host must respect while
+    /// the session is relayed. Chosen by the operator so a small cloud
+    /// instance never saturates its uplink; `None` disables the clamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_bitrate_ceiling: Option<u32>,
 }
 
 /// Online state of a paired host.
@@ -142,10 +146,13 @@ pub struct PeerState {
     pub device: DeviceInfo,
     /// True while the host keeps its signaling connection open.
     pub online: bool,
-    /// Round trip time of the server probe, in milliseconds.
+    /// Round trip time between the server and that device, in milliseconds,
+    /// measured with WebSocket pings.
     pub rtt_ms: Option<u32>,
-    /// Display name of the host machine, e.g. `DESKTOP-4F2`.
-    pub hostname: Option<String>,
+    /// True while the device is in a session, so a second controller can
+    /// show "in use" instead of kicking the first one off.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 /// Messages the server sends to a device.
@@ -182,8 +189,8 @@ pub enum ServerMessage {
         viewport: Option<Viewport>,
         audio: bool,
         /// Codec the controller asked for; echoed to both ends.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        video_codec: Option<String>,
+        #[serde(default)]
+        video_codec: VideoCodec,
     },
     /// The requested peer cannot accept a session right now.
     SessionRejected { reason: String },
@@ -277,7 +284,7 @@ mod tests {
                 fps: 120,
             },
             audio: true,
-            video_codec: Some("h264".into()),
+            video_codec: VideoCodec::H264,
         };
         let json = message.to_json();
         assert!(json.contains("\"type\":\"session_start\""));
@@ -316,7 +323,7 @@ mod tests {
                 device: controller(),
                 online: true,
                 rtt_ms: Some(12),
-                hostname: Some("Living room".into()),
+                busy: false,
             }],
         };
         let json = message.to_json();

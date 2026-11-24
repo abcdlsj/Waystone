@@ -457,7 +457,7 @@ async fn full_session_delivers_media_both_ways() {
             target: host_id,
             viewport,
             audio: true,
-            video_codec: Some("h265".into()),
+            video_codec: waystone_proto::VideoCodec::H265,
         })
         .await;
     let session_id = match controller

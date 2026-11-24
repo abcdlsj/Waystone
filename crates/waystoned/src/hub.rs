@@ -332,7 +332,7 @@ impl Hub {
         target: DeviceId,
         viewport: waystone_proto::device::Viewport,
         audio: bool,
-        video_codec: Option<String>,
+        video_codec: waystone_proto::VideoCodec,
     ) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let Some(controller) = self.peer_by_connection(&inner, connection_id).cloned() else {
@@ -395,7 +395,7 @@ impl Hub {
             peer: host.info.clone(),
             viewport: Some(viewport),
             audio,
-            video_codec: video_codec.clone(),
+            video_codec,
         });
         let _ = host.outbox.send(ServerMessage::SessionAccepted {
             session_id,
@@ -481,7 +481,7 @@ impl Hub {
                 online: inner.peers.contains_key(&stored.info.id),
                 device: stored.info,
                 rtt_ms: None,
-                hostname: None,
+                busy: false,
             })
             .collect();
         // Hosts first, then by name: the phone list must not jump around.

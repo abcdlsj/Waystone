@@ -14,7 +14,7 @@ pub mod input;
 pub mod pairing;
 pub mod signal;
 
-pub use device::{DeviceId, DeviceInfo, Platform, Role, Viewport};
+pub use device::{DeviceId, DeviceInfo, Platform, Role, VideoCodec, Viewport};
 pub use pairing::PairingUri;
 pub use signal::{ClientMessage, RtcSignal, ServerMessage, SessionControl};
 

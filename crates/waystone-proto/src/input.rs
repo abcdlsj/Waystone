@@ -15,7 +15,9 @@
 use std::fmt;
 
 /// Coordinate space used by mouse positions: the host maps `0..=65535` onto the
-/// whole virtual desktop, which is resolution independent.
+/// streamed display, edge to edge, which is resolution independent. The
+/// controller maps the same range onto the decoded picture, so the two agree
+/// as long as the encoded frame has no padding.
 pub const AXIS_MAX: u16 = u16::MAX;
 
 /// Opcodes on the wire.
@@ -79,6 +81,43 @@ impl PadButton {
     pub const START: u32 = 1 << 7;
 }
 
+/// Key codes carried by [`InputEvent::Key`].
+///
+/// They are USB HID usage ids from the Keyboard/Keypad page (0x07), which is
+/// the only key code space that is neither tied to an operating system nor to
+/// a keyboard layout. Each host maps them onto its native codes (macOS virtual
+/// key codes, Windows scan codes); controllers never see native codes.
+pub mod keys {
+    /// `A` is 0x04 and the letters follow in alphabetical order up to `Z`.
+    pub const A: u32 = 0x04;
+    pub const Z: u32 = 0x1d;
+    /// `1` is 0x1e, the digits follow up to `9`, then `0` is 0x27.
+    pub const DIGIT_1: u32 = 0x1e;
+    pub const DIGIT_0: u32 = 0x27;
+    pub const ENTER: u32 = 0x28;
+    pub const ESCAPE: u32 = 0x29;
+    pub const BACKSPACE: u32 = 0x2a;
+    pub const TAB: u32 = 0x2b;
+    pub const SPACE: u32 = 0x2c;
+    pub const F1: u32 = 0x3a;
+    pub const F12: u32 = 0x45;
+    pub const RIGHT: u32 = 0x4f;
+    pub const LEFT: u32 = 0x50;
+    pub const DOWN: u32 = 0x51;
+    pub const UP: u32 = 0x52;
+    pub const LEFT_CONTROL: u32 = 0xe0;
+    pub const LEFT_SHIFT: u32 = 0xe1;
+    pub const LEFT_ALT: u32 = 0xe2;
+    /// Windows key on a PC, Command on a Mac.
+    pub const LEFT_META: u32 = 0xe3;
+
+    /// Usage id of an ASCII letter, case insensitive.
+    pub fn letter(c: char) -> Option<u32> {
+        c.is_ascii_alphabetic()
+            .then(|| A + (c.to_ascii_lowercase() as u32 - 'a' as u32))
+    }
+}
+
 /// Keyboard modifier bit mask shared by hosts and controllers.
 pub mod modifiers {
     pub const SHIFT: u8 = 1 << 0;
@@ -108,6 +147,7 @@ pub enum InputEvent {
         dy: i16,
     },
     Key {
+        /// USB HID usage id, see [`keys`].
         code: u32,
         down: bool,
         modifiers: u8,

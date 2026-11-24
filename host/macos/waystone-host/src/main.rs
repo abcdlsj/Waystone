@@ -267,7 +267,7 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 // choice wins over the local default. The encoder and the SDP
                 // offer must agree: a mismatch leaves the viewer with audio and
                 // a permanently black picture.
-                let codec = video_codec.as_deref().unwrap_or(&config.codec).to_string();
+                let codec = video_codec.to_string();
                 debug!("controller viewport {viewport:?}");
                 let plan = stream_plan(config, viewport);
                 info!(
@@ -281,8 +281,8 @@ async fn session_loop(config: &Config, key: Arc<DeviceKey>) -> Result<()> {
                 });
                 // The relay credentials are allocated by the server per session;
                 // until that is wired up the host only advertises direct paths.
-                let mut engine_config = EngineConfig::new(waystone_rtc::Role::Host, sink)
-                    .with_video_codec(waystone_rtc::VideoCodec::parse(&codec));
+                let mut engine_config =
+                    EngineConfig::new(waystone_rtc::Role::Host, sink).with_video_codec(video_codec);
                 if let Some(viewport) = viewport {
                     engine_config = engine_config.with_session(SessionOptions {
                         viewport,
