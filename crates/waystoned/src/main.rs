@@ -5,6 +5,7 @@
 //! to enroll devices without going through the panel.
 
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +66,11 @@ struct Args {
     /// the primary LAN IPv4; set it to the public IP behind a NAT.
     #[arg(long, env = "WAYSTONE_TURN_PUBLIC_IP")]
     turn_public_ip: Option<String>,
+
+    /// UDP ports relayed allocations use, e.g. `49160-49200`, so a cloud
+    /// firewall can open exactly these. Any ephemeral port by default.
+    #[arg(long, env = "WAYSTONE_RELAY_PORTS", value_parser = parse_port_range)]
+    relay_ports: Option<RangeInclusive<u16>>,
 
     /// Shared secret for TURN credentials. Defaults to a random secret stored
     /// in `<data-dir>/turn.secret`.
@@ -331,11 +337,12 @@ fn start_turn(
     );
 
     let listen = args.turn_listen;
+    let relay_ports = args.relay_ports.clone();
     let turn_secret = secret.clone();
     let cancel = cancel.clone();
     tokio::spawn(async move {
         if let Err(error) =
-            waystoned::turnserver::run(listen, &public_ip, &turn_secret, cancel).await
+            waystoned::turnserver::run(listen, &public_ip, &turn_secret, relay_ports, cancel).await
         {
             warn!("turn server stopped: {error:#}");
         }
@@ -346,6 +353,25 @@ fn start_turn(
         ttl: TURN_CREDENTIAL_TTL,
         relay_bitrate_ceiling: ceiling,
     })
+}
+
+/// Parses `low-high` into an inclusive port range.
+fn parse_port_range(text: &str) -> Result<RangeInclusive<u16>, String> {
+    let (low, high) = text
+        .split_once('-')
+        .ok_or_else(|| format!("expected LOW-HIGH, got {text:?}"))?;
+    let low: u16 = low
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad port {low:?}"))?;
+    let high: u16 = high
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad port {high:?}"))?;
+    if low == 0 || low > high {
+        return Err(format!("{text:?} is not a range of ports"));
+    }
+    Ok(low..=high)
 }
 
 fn spawn_token_pruner(store: Arc<Store>, cancel: CancellationToken) {

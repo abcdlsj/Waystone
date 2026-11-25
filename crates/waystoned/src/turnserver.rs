@@ -12,7 +12,9 @@
 //! for peers on its own LAN.
 
 use std::net::{IpAddr, SocketAddr};
+use std::ops::RangeInclusive;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -48,6 +50,9 @@ pub struct TurnServerConfig {
     /// Lets relays reach loopback peers. Only for tests that run every party
     /// on one machine; never enable it on a reachable server.
     pub allow_loopback_peers: bool,
+    /// Ports relayed allocations bind, so a cloud firewall can open exactly
+    /// these; `None` lets the OS pick any ephemeral port.
+    pub relay_ports: Option<RangeInclusive<u16>>,
 }
 
 impl TurnServerConfig {
@@ -57,6 +62,7 @@ impl TurnServerConfig {
             public_ip,
             secret: secret.into(),
             allow_loopback_peers: false,
+            relay_ports: None,
         }
     }
 }
@@ -85,6 +91,8 @@ impl TurnServer {
                 relay_addr_generator: Box::new(FilteredRelay {
                     relay_address: config.public_ip,
                     allow_loopback: config.allow_loopback_peers,
+                    ports: config.relay_ports.clone(),
+                    next_port: AtomicU16::new(0),
                 }),
             }],
             realm: REALM.to_owned(),
@@ -117,13 +125,16 @@ pub async fn run(
     listen: SocketAddr,
     public_ip: &str,
     secret: &str,
+    relay_ports: Option<RangeInclusive<u16>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let relay_ip = IpAddr::from_str(public_ip).unwrap_or_else(|_| {
         warn!("{public_ip} is not an IP address, using 127.0.0.1 for relayed candidates");
         IpAddr::from([127, 0, 0, 1])
     });
-    let server = TurnServer::start(TurnServerConfig::new(listen, relay_ip, secret)).await?;
+    let mut config = TurnServerConfig::new(listen, relay_ip, secret);
+    config.relay_ports = relay_ports;
+    let server = TurnServer::start(config).await?;
     cancel.cancelled().await;
     info!("turn shutting down");
     server.close().await;
@@ -156,6 +167,34 @@ fn peer_allowed(ip: IpAddr, allow_loopback: bool) -> bool {
 struct FilteredRelay {
     relay_address: IpAddr,
     allow_loopback: bool,
+    ports: Option<RangeInclusive<u16>>,
+    /// Offset of the next port to try, so freed ports are not reused at once.
+    next_port: AtomicU16,
+}
+
+impl FilteredRelay {
+    /// Binds a relay socket: the requested port, else the first free port of
+    /// the configured range, else any port.
+    async fn bind(&self, ip: IpAddr, requested_port: u16) -> std::io::Result<UdpSocket> {
+        let range = match &self.ports {
+            Some(range) if requested_port == 0 => range.clone(),
+            _ => return UdpSocket::bind(SocketAddr::new(ip, requested_port)).await,
+        };
+        let size = u32::from(*range.end()) - u32::from(*range.start()) + 1;
+        let first = u32::from(self.next_port.fetch_add(1, Ordering::Relaxed)) % size;
+        for step in 0..size {
+            let port = *range.start() as u32 + (first + step) % size;
+            match UdpSocket::bind(SocketAddr::new(ip, port as u16)).await {
+                Ok(socket) => return Ok(socket),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("every relay port in {range:?} is taken"),
+        ))
+    }
 }
 
 #[async_trait]
@@ -176,12 +215,13 @@ impl RelayAddressGenerator for FilteredRelay {
         if !self.supports_family(use_ipv4) {
             return Err(turn::Error::ErrInvalidRequestedFamilyValue);
         }
-        let bind = if use_ipv4 {
-            SocketAddr::from(([0, 0, 0, 0], requested_port))
+        let ip = if use_ipv4 {
+            IpAddr::from([0, 0, 0, 0])
         } else {
-            SocketAddr::from(([0u16; 8], requested_port))
+            IpAddr::from([0u16; 8])
         };
-        let socket = UdpSocket::bind(bind)
+        let socket = self
+            .bind(ip, requested_port)
             .await
             .map_err(|error| turn::Error::Other(error.to_string()))?;
         let mut relay_addr = socket
@@ -386,12 +426,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relays_bind_inside_the_configured_range() {
+        let taken = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        let start = taken.local_addr().unwrap().port();
+        let relay = FilteredRelay {
+            relay_address: IpAddr::from([203, 0, 113, 7]),
+            allow_loopback: false,
+            ports: Some(start..=start.saturating_add(1)),
+            next_port: AtomicU16::new(0),
+        };
+        // The first port is taken, so the range moves on to the second.
+        let (_held, addr) = relay.allocate_conn(true, 0).await.unwrap();
+        assert_eq!(addr, SocketAddr::from(([203, 0, 113, 7], start + 1)));
+        // Both are taken now: no silent fallback to a port outside the range.
+        assert!(relay.allocate_conn(true, 0).await.is_err());
+    }
+
+    #[tokio::test]
     async fn bind_failure_is_reported() {
         // Port 0 always binds, so bind a socket first and reuse its address to
         // force the failure path.
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = socket.local_addr().unwrap();
-        let result = run(address, "127.0.0.1", "secret", CancellationToken::new()).await;
+        let result = run(
+            address,
+            "127.0.0.1",
+            "secret",
+            None,
+            CancellationToken::new(),
+        )
+        .await;
         assert!(result.is_err(), "binding a taken port must fail");
     }
 }

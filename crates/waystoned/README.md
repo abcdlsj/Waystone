@@ -63,6 +63,7 @@ lived development tokens.
 | `--turn-endpoint` | `WAYSTONE_TURN_ENDPOINT` | `<LAN IPv4>:<TURN port>` |
 | `--turn-listen` | `WAYSTONE_TURN_LISTEN` | `0.0.0.0:3478` |
 | `--turn-public-ip` | `WAYSTONE_TURN_PUBLIC_IP` | LAN IPv4 |
+| `--relay-ports` | `WAYSTONE_RELAY_PORTS` | any ephemeral port; e.g. `49160-49200` to open exactly those in a cloud firewall |
 | `--turn-secret` | `WAYSTONE_TURN_SECRET` | random, kept in `<data-dir>/turn.secret` |
 | `--relay-bitrate-ceiling` | `WAYSTONE_RELAY_BITRATE_CEILING` | `4000000` bps; `0` disables |
 | `--no-turn` | `WAYSTONE_NO_TURN` | off |
