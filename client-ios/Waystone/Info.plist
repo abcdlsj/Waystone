@@ -68,6 +68,15 @@
     <array>
         <string>audio</string>
     </array>
+    <!-- Servers are self-hosted at any host or IP with a self-signed certificate.
+         ATS would reject that before SignalingClient pins the SHA-256 fingerprint
+         from the pairing link, and exception domains cannot name IP addresses.
+         Trust comes from the pin instead; a mismatch is still refused. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Waystone connects to your own computer on the local network.</string>
     <key>NSBonjourServices</key>
