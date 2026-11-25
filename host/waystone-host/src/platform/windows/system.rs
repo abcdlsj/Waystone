@@ -19,6 +19,23 @@ use windows::Win32::UI::HiDpi::{
 use super::com;
 use crate::display::Display;
 
+pub fn attach_parent_console() {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // Fails when started from Explorer, which has no console; that is fine.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+pub fn local_app_data() -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as *const _));
+        text.map(std::path::PathBuf::from)
+    }
+}
+
 pub fn become_dpi_aware() {
     if let Err(error) =
         unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
@@ -114,45 +131,46 @@ pub fn lock_screen() {
 ///
 /// The original state is read first, so a machine that was already muted
 /// stays muted. Loopback capture taps the mix before the endpoint volume,
-/// so the stream keeps its sound.
+/// so the stream keeps its sound. The endpoint is looked up again to
+/// restore: COM interfaces cannot move between threads, and the session
+/// that owns this may.
 pub struct SpeakerMute {
-    endpoint: Option<IAudioEndpointVolume>,
+    restore: bool,
 }
 
 impl SpeakerMute {
     pub fn engage() -> SpeakerMute {
-        let endpoint = match default_endpoint_volume() {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                warn!("cannot reach the speakers to mute them: {error}");
-                return SpeakerMute { endpoint: None };
+        let muted = default_endpoint_volume().and_then(|endpoint| unsafe {
+            if endpoint.GetMute()?.as_bool() {
+                return Ok(false);
             }
-        };
-        let muted = unsafe { endpoint.GetMute() }.map(|value| value.as_bool());
-        let endpoint = match muted {
-            Ok(false) => match unsafe { endpoint.SetMute(true, std::ptr::null()) } {
-                Ok(()) => {
-                    info!("speakers muted for the session");
-                    Some(endpoint)
-                }
-                Err(error) => {
-                    warn!("cannot mute the speakers: {error}");
-                    None
-                }
-            },
-            _ => None,
-        };
-        SpeakerMute { endpoint }
+            endpoint.SetMute(true, std::ptr::null())?;
+            Ok(true)
+        });
+        match muted {
+            Ok(true) => {
+                info!("speakers muted for the session");
+                SpeakerMute { restore: true }
+            }
+            Ok(false) => SpeakerMute { restore: false },
+            Err(error) => {
+                warn!("cannot mute the speakers: {error}");
+                SpeakerMute { restore: false }
+            }
+        }
     }
 }
 
 impl Drop for SpeakerMute {
     fn drop(&mut self) {
-        if let Some(endpoint) = self.endpoint.take() {
-            com::enter_mta();
-            if unsafe { endpoint.SetMute(false, std::ptr::null()) }.is_ok() {
-                info!("speakers restored");
-            }
+        if !self.restore {
+            return;
+        }
+        match default_endpoint_volume()
+            .and_then(|endpoint| unsafe { endpoint.SetMute(false, std::ptr::null()) })
+        {
+            Ok(()) => info!("speakers restored"),
+            Err(error) => warn!("cannot restore the speakers: {error}"),
         }
     }
 }

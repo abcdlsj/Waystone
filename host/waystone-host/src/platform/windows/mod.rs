@@ -12,6 +12,7 @@ mod com;
 mod inject;
 mod keymap;
 mod system;
+pub mod tray;
 mod video;
 
 use std::path::PathBuf;
@@ -27,15 +28,18 @@ pub const INPUT_PERMISSION_HINT: &str = "not running as administrator: windows o
      from an elevated prompt to control them too.";
 
 /// Per-monitor DPI awareness, so display rectangles, the cursor position and
-/// injected coordinates are all physical pixels.
+/// injected coordinates are all physical pixels; and the terminal, if one
+/// started this GUI-subsystem binary, for the CLI's output.
 pub fn init() {
     system::become_dpi_aware();
+    system::attach_parent_console();
 }
 
-/// `%LOCALAPPDATA%\Waystone`.
+/// `%LOCALAPPDATA%\Waystone`, from the shell rather than the environment:
+/// a process started through WSL interop has no `LOCALAPPDATA`.
 pub fn state_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(|base| PathBuf::from(base).join("Waystone"))
+    system::local_app_data()
+        .map(|base| base.join("Waystone"))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 

@@ -1,9 +1,16 @@
 //! The host agent: keeps this computer online in the pool and streams it.
 //!
+//! On Windows the binary is a GUI program: started without arguments (from
+//! Explorer, or at login) it lives in the notification area; with a
+//! subcommand it attaches to the terminal it was started from.
+//!
 //! * `agent` – signaling connection, reconnects, one session at a time.
 //! * `session` – one stream: engine, capture, input, rollback.
 //! * `input` – decoding and held-state rules; `plan` – stream size and rate.
-//! * `platform` – capture, injection and system calls per operating system.
+//! * `platform` – capture, injection, system calls and the tray per
+//!   operating system.
+
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod agent;
 mod capture;
@@ -23,12 +30,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use waystone_proto::pairing::PairingUri;
-use waystone_proto::signal::{ClientMessage, ServerMessage};
 use waystone_proto::VideoCodec;
 
 use crate::config::{state_dir, Config, DeviceKey};
-use crate::signal::Signal;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -41,8 +45,9 @@ struct Args {
     #[arg(long, env = "WAYSTONE_STATE_DIR")]
     state_dir: Option<PathBuf>,
 
+    /// Without one, Windows starts the tray and macOS prints this help.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -72,71 +77,72 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         seconds: u64,
     },
+    /// Lives in the notification area: status, pairing, settings, quit.
+    #[cfg(windows)]
+    Tray,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     platform::init();
+    let args = Args::parse();
+    let dir = args.state_dir.unwrap_or_else(state_dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let command = match args.command {
+        Some(command) => command,
+        #[cfg(windows)]
+        None => Command::Tray,
+        #[cfg(not(windows))]
+        None => {
+            use clap::CommandFactory;
+            Args::command().print_help()?;
+            return Ok(());
+        }
+    };
+    #[cfg(windows)]
+    if matches!(command, Command::Tray) {
+        return platform::tray::run(&dir);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "waystone_host=info,waystone_rtc=warn".into()),
         )
         .init();
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(cli(command, &dir))
+}
 
-    let args = Args::parse();
-    let dir = args.state_dir.unwrap_or_else(state_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-
-    match args.command {
-        Command::Pair { uri, name } => pair(&dir, &uri, name).await,
+async fn cli(command: Command, dir: &Path) -> Result<()> {
+    match command {
+        Command::Pair { uri, name } => {
+            let name = name.unwrap_or_else(Config::default_name);
+            agent::pair(dir, &uri, name.clone()).await?;
+            println!("Paired as \"{name}\". Start streaming with `waystone-host run`.");
+            Ok(())
+        }
         Command::Run { no_lock, no_mute } => {
-            let mut config = load(&dir)?;
+            let mut config = load(dir)?;
             if no_lock {
                 config.lock_on_disconnect = false;
             }
             config.mute_speakers &= !no_mute;
             let key = Arc::new(DeviceKey::load_or_create(&dir.join("device.key"))?);
-            agent::run(config, key).await
+            // Nothing steers the CLI; holding the sender keeps the channel open.
+            let (_commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+            agent::run(config, key, Arc::new(|_| {}), receiver).await
         }
-        Command::Status => status(&dir),
+        Command::Status => status(dir),
         Command::CaptureTest { seconds } => capture_test(seconds).await,
+        #[cfg(windows)]
+        Command::Tray => unreachable!("handled before the runtime starts"),
     }
 }
 
 fn load(dir: &Path) -> Result<Config> {
     Config::load(&dir.join("config.json"))
         .context("this computer is not paired yet; run `waystone-host pair <link>` first")
-}
-
-/// Spends a host pairing token and writes the configuration.
-async fn pair(dir: &Path, link: &str, name: Option<String>) -> Result<()> {
-    let uri: PairingUri = link
-        .trim()
-        .parse()
-        .map_err(|error| anyhow::anyhow!("not a pairing link: {error}"))?;
-    let name = name.unwrap_or_else(Config::default_name);
-    let key = DeviceKey::load_or_create(&dir.join("device.key"))?;
-
-    let (mut signal, _challenge) = Signal::connect(&uri.endpoint, &uri.fingerprint).await?;
-    signal
-        .send(&ClientMessage::PairRequest {
-            token: uri.token.clone(),
-            device: key.info(&name),
-        })
-        .await?;
-    loop {
-        match signal.next_message().await? {
-            ServerMessage::PairAccepted { .. } => break,
-            ServerMessage::PairRejected { reason } => bail!("pairing was rejected: {reason}"),
-            _ => {}
-        }
-    }
-
-    Config::new(uri.endpoint, uri.turn, uri.fingerprint, name.clone())
-        .save(&dir.join("config.json"))?;
-    println!("Paired as \"{name}\". Start streaming with `waystone-host run`.");
-    Ok(())
 }
 
 fn status(dir: &Path) -> Result<()> {
