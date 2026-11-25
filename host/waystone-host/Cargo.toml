@@ -1,6 +1,6 @@
 [package]
 name = "waystone-host"
-description = "macOS host agent: captures the desktop, encodes HEVC and streams it"
+description = "Host agent: captures the desktop, encodes it and streams it (macOS and Windows)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,8 @@ name = "waystone-host"
 path = "src/main.rs"
 
 [dependencies]
-waystone-proto = { path = "../../../crates/waystone-proto" }
-waystone-rtc = { path = "../../../crates/waystone-rtc" }
+waystone-proto = { path = "../../crates/waystone-proto" }
+waystone-rtc = { path = "../../crates/waystone-rtc" }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
@@ -36,4 +36,4 @@ cc = "1"
 
 [dev-dependencies]
 tempfile = "3"
-waystone-proto = { path = "../../../crates/waystone-proto" }
+waystone-proto = { path = "../../crates/waystone-proto" }

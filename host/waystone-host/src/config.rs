@@ -6,9 +6,11 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 
-use waystone_proto::device::{DeviceId, DeviceInfo, Platform, Role};
+use waystone_proto::device::{DeviceId, DeviceInfo, Role};
 use waystone_proto::identity::encode_public_key;
 use waystone_proto::signal::ByeReason;
+
+use crate::platform;
 
 /// Everything the agent needs to reconnect without user interaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +92,7 @@ impl Config {
 
     /// Hostname with a sensible default.
     pub fn default_name() -> String {
-        hostname().unwrap_or_else(|| "Waystone Host".to_string())
+        platform::hostname().unwrap_or_else(|| "Waystone Host".to_string())
     }
 }
 
@@ -134,7 +136,7 @@ impl DeviceKey {
         DeviceInfo {
             id: DeviceId::from_public_key(&public),
             name: name.to_string(),
-            platform: Platform::Macos,
+            platform: platform::PLATFORM,
             role: Role::Host,
             public_key: self.info_key.clone(),
         }
@@ -149,52 +151,33 @@ impl DeviceKey {
     }
 }
 
-/// Default state directory: `~/Library/Application Support/Waystone`.
+/// Where the device key and configuration live unless overridden.
 pub fn state_dir() -> PathBuf {
     match std::env::var_os("WAYSTONE_STATE_DIR") {
         Some(value) => PathBuf::from(value),
-        None => home_dir()
-            .map(|home| home.join("Library/Application Support/Waystone"))
-            .unwrap_or_else(|| PathBuf::from(".")),
+        None => platform::state_dir(),
     }
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-fn hostname() -> Option<String> {
-    let mut buffer = [0u8; 256];
-    let status = unsafe { libc_gethostname(buffer.as_mut_ptr() as *mut i8, buffer.len()) };
-    if status != 0 {
-        return None;
-    }
-    let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
-    Some(String::from_utf8_lossy(&buffer[..end]).to_string())
-}
-
-// `gethostname` is not exposed by std, and pulling in the whole libc crate for
-// one call is not worth it.
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut i8, len: usize) -> i32;
 }
 
 /// Writes a file only the owner can read, without a window where it is
 /// briefly readable by others: a temporary file is created 0600, filled,
 /// and renamed over the target.
+///
+/// On Windows the state directory sits in the user's profile, whose ACL
+/// already keeps other users out, so there is no mode to set.
 fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension("tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(&temporary)
         .with_context(|| format!("writing {}", temporary.display()))?;
     file.write_all(contents)?;
@@ -269,9 +252,12 @@ mod tests {
         assert_eq!(loaded.max_bitrate, 6_000_000);
         assert!(!loaded.lock_on_disconnect);
         assert!(loaded.mute_speakers);
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

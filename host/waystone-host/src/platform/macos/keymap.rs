@@ -1,7 +1,5 @@
 //! USB HID usages (what the protocol carries) to macOS virtual key codes.
 
-use waystone_proto::input::modifiers;
-
 /// The macOS virtual key code for a HID usage on the Keyboard page.
 pub fn virtual_key(usage: u32) -> Option<u16> {
     const LETTERS: [u16; 26] = [
@@ -56,17 +54,6 @@ pub fn virtual_key(usage: u32) -> Option<u16> {
     })
 }
 
-/// The modifier bit a HID usage stands for, if it is a modifier key.
-pub fn modifier_bit(usage: u32) -> Option<u8> {
-    match usage {
-        0xe0 | 0xe4 => Some(modifiers::CONTROL),
-        0xe1 | 0xe5 => Some(modifiers::SHIFT),
-        0xe2 | 0xe6 => Some(modifiers::ALT),
-        0xe3 | 0xe7 => Some(modifiers::META),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,12 +78,5 @@ mod tests {
         assert_eq!(virtual_key(keys::LEFT_CONTROL), Some(0x3B));
         assert_eq!(virtual_key(keys::UP), Some(0x7E));
         assert_eq!(virtual_key(0xff), None);
-    }
-
-    #[test]
-    fn knows_modifier_keys() {
-        assert_eq!(modifier_bit(keys::LEFT_CONTROL), Some(modifiers::CONTROL));
-        assert_eq!(modifier_bit(keys::LEFT_META), Some(modifiers::META));
-        assert_eq!(modifier_bit(keys::A), None);
     }
 }

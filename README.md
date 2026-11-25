@@ -13,7 +13,7 @@ commit messages and developer documentation — is English.
 crates/waystone-proto   Wire protocol shared by every component
 crates/waystone-rtc     str0m session, ICE and bitrate plumbing
 crates/waystoned        All-in-one daemon: admin panel, WSS signaling, TURN
-host/macos              macOS host agent (ScreenCaptureKit + VideoToolbox)
+host/waystone-host      host agent; platform/macos (ScreenCaptureKit + VideoToolbox), platform/windows
 client-ios              iOS controller (SwiftUI + VideoToolbox + Metal)
 ```
 
@@ -27,7 +27,7 @@ commit, so a partially implemented feature never blocks the tree from building.
 | `waystone-proto` | Protocol types, input frames, pairing URI |
 | `waystone-rtc` | In progress |
 | `waystoned` | In progress |
-| `host/macos` | In progress |
+| `host/waystone-host` | macOS done, Windows in progress |
 | `client-ios` | In progress |
 
 ## Development

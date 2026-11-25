@@ -1,20 +1,19 @@
-//! The macOS host agent: keeps this Mac online in the pool and streams it.
+//! The host agent: keeps this computer online in the pool and streams it.
 //!
 //! * `agent` – signaling connection, reconnects, one session at a time.
 //! * `session` – one stream: engine, capture, input, rollback.
-//! * `capture`, `input`, `system` – the Swift media layer behind `ffi`.
-//! * `plan`, `keymap` – pure decisions, unit tested.
+//! * `input` – decoding and held-state rules; `plan` – stream size and rate.
+//! * `platform` – capture, injection and system calls per operating system.
 
 mod agent;
 mod capture;
 mod config;
-mod ffi;
+mod display;
 mod input;
-mod keymap;
 mod plan;
+mod platform;
 mod session;
 mod signal;
-mod system;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,7 +34,7 @@ use crate::signal::Signal;
 #[command(
     name = "waystone-host",
     version,
-    about = "Stream this Mac to your Waystone pool"
+    about = "Stream this computer to your Waystone pool"
 )]
 struct Args {
     /// Directory holding the device key and configuration.
@@ -77,6 +76,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    platform::init();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
 
 fn load(dir: &Path) -> Result<Config> {
     Config::load(&dir.join("config.json"))
-        .context("this Mac is not paired yet; run `waystone-host pair <link>` first")
+        .context("this computer is not paired yet; run `waystone-host pair <link>` first")
 }
 
 /// Spends a host pairing token and writes the configuration.
@@ -154,10 +154,10 @@ fn status(dir: &Path) -> Result<()> {
     println!("mute         {}", config.mute_speakers);
     println!(
         "input        {}",
-        if system::input_permitted(false) {
+        if platform::input_permitted(false) {
             "allowed"
         } else {
-            "needs Accessibility permission"
+            platform::INPUT_PERMISSION_HINT
         }
     );
     Ok(())
@@ -166,17 +166,18 @@ fn status(dir: &Path) -> Result<()> {
 /// Starts capture with no session attached and counts what comes out, so a
 /// missing Screen Recording permission shows up before pairing a phone.
 async fn capture_test(seconds: u64) -> Result<()> {
-    let display = system::Display::main().context("no display")?;
+    let display = platform::main_display().context("no display")?;
     let plan = plan::plan(&display, None, 8_000_000);
     info!("capturing {}x{} for {seconds}s", plan.width, plan.height);
     let sink = capture::FrameSink::new(None);
-    let capture = capture::Capture::start(display.id, &plan, VideoCodec::H265, true, sink).await?;
+    let capture =
+        platform::Capture::start(&display, &plan, VideoCodec::H265, true, sink.clone()).await?;
     tokio::time::sleep(Duration::from_secs(seconds)).await;
-    let (video, audio) = capture.counts();
-    drop(capture);
+    tokio::task::block_in_place(|| drop(capture));
+    let (video, audio) = sink.counts();
     println!("{video} video frames and {audio} audio packets in {seconds}s");
     if video == 0 {
-        bail!("no frames: allow Screen Recording for this binary, then retry");
+        bail!("no frames: check the screen capture permission for this binary, then retry");
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 use waystone_proto::Viewport;
 
-use crate::system::Display;
+use crate::display::Display;
 
 /// Encoded size and target bitrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -20,10 +20,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
-use waystone_proto::input::InputEvent;
+use waystone_proto::input::{modifiers as modifier_bits, InputEvent};
 
-use crate::keymap;
-use crate::system::Display;
+use crate::display::Display;
+use crate::platform;
 
 /// Shortest time a button stays down.
 pub const MIN_CLICK_HOLD: Duration = Duration::from_millis(15);
@@ -53,9 +53,14 @@ pub enum Action {
         dy: i32,
     },
     Key {
-        virtual_key: u16,
+        /// USB HID usage; each platform maps it to its own key codes.
+        usage: u32,
         down: bool,
+        /// Every modifier in effect, held or requested.
         modifiers: u8,
+        /// Requested by the event but not held as keys. Platforms whose key
+        /// events cannot carry modifier flags press these around the key.
+        implied: u8,
     },
     Text(String),
     Wait(Duration),
@@ -87,7 +92,7 @@ impl InputState {
     fn held_modifiers(&self) -> u8 {
         self.keys
             .iter()
-            .filter_map(|&key| keymap::modifier_bit(key))
+            .filter_map(|&key| modifier_bit(key))
             .fold(0, |bits, bit| bits | bit)
     }
 
@@ -115,19 +120,17 @@ impl InputState {
                 down,
                 modifiers,
             } => {
-                let Some(virtual_key) = keymap::virtual_key(code) else {
-                    debug!("no Mac key for HID usage {code:#04x}");
-                    return Vec::new();
-                };
                 if down {
                     self.keys.insert(code);
                 } else {
                     self.keys.remove(&code);
                 }
+                let held = self.held_modifiers();
                 vec![Action::Key {
-                    virtual_key,
+                    usage: code,
                     down,
-                    modifiers: modifiers | self.held_modifiers(),
+                    modifiers: modifiers | held,
+                    implied: modifiers & !held,
                 }]
             }
             InputEvent::Text(text) => vec![Action::Text(text)],
@@ -208,17 +211,27 @@ impl InputState {
         let keys = std::mem::take(&mut self.keys);
         let (modifiers, plain): (Vec<u32>, Vec<u32>) = keys
             .into_iter()
-            .partition(|&key| keymap::modifier_bit(key).is_some());
-        for key in plain.into_iter().chain(modifiers) {
-            if let Some(virtual_key) = keymap::virtual_key(key) {
-                actions.push(Action::Key {
-                    virtual_key,
-                    down: false,
-                    modifiers: 0,
-                });
-            }
+            .partition(|&key| modifier_bit(key).is_some());
+        for usage in plain.into_iter().chain(modifiers) {
+            actions.push(Action::Key {
+                usage,
+                down: false,
+                modifiers: 0,
+                implied: 0,
+            });
         }
         actions
+    }
+}
+
+/// The modifier bit a HID usage stands for, if it is a modifier key.
+pub fn modifier_bit(usage: u32) -> Option<u8> {
+    match usage {
+        0xe0 | 0xe4 => Some(modifier_bits::CONTROL),
+        0xe1 | 0xe5 => Some(modifier_bits::SHIFT),
+        0xe2 | 0xe6 => Some(modifier_bits::ALT),
+        0xe3 | 0xe7 => Some(modifier_bits::META),
+        _ => None,
     }
 }
 
@@ -302,37 +315,7 @@ fn run(display: Display, commands: mpsc::Receiver<Command>) {
             Command::ReleaseAll => state.release_all(),
             Command::Stop => break,
         };
-        actions.iter().for_each(post);
-    }
-}
-
-fn post(action: &Action) {
-    use crate::ffi::*;
-    unsafe {
-        match action {
-            Action::Move {
-                x,
-                y,
-                held,
-                modifiers,
-            } => ws_inject_mouse_move(*x, *y, held.map_or(-1, i32::from), *modifiers),
-            Action::Button {
-                button,
-                down,
-                x,
-                y,
-                clicks,
-                modifiers,
-            } => ws_inject_mouse_button(i32::from(*button), *down, *x, *y, *clicks, *modifiers),
-            Action::Scroll { dx, dy } => ws_inject_scroll(*dx, *dy),
-            Action::Key {
-                virtual_key,
-                down,
-                modifiers,
-            } => ws_inject_key(*virtual_key, *down, *modifiers),
-            Action::Text(text) => ws_inject_text(text.as_ptr(), text.len()),
-            Action::Wait(duration) => std::thread::sleep(*duration),
-        }
+        actions.iter().for_each(platform::post);
     }
 }
 
@@ -442,18 +425,49 @@ mod tests {
                 },
                 // W before Control, so nothing is released into a shortcut.
                 Action::Key {
-                    virtual_key: 0x0D,
+                    usage: keys::letter('w').unwrap(),
                     down: false,
-                    modifiers: 0
+                    modifiers: 0,
+                    implied: 0
                 },
                 Action::Key {
-                    virtual_key: 0x3B,
+                    usage: keys::LEFT_CONTROL,
                     down: false,
-                    modifiers: 0
+                    modifiers: 0,
+                    implied: 0
                 },
             ]
         );
         assert!(state.release_all().is_empty());
+    }
+
+    #[test]
+    fn requested_modifiers_that_are_not_held_are_implied() {
+        let mut state = InputState::new(display());
+        let now = Instant::now();
+        let key = |code, down, modifiers| InputEvent::Key {
+            code,
+            down,
+            modifiers,
+        };
+        let copy = state.handle(
+            key(keys::letter('c').unwrap(), true, modifiers::CONTROL),
+            now,
+        );
+        assert!(matches!(
+            copy[0],
+            Action::Key { modifiers: m, implied: i, .. } if m == modifiers::CONTROL && i == modifiers::CONTROL
+        ));
+        state.handle(key(keys::LEFT_SHIFT, true, 0), now);
+        let held = state.handle(key(keys::A, true, modifiers::SHIFT), now);
+        assert!(matches!(held[0], Action::Key { implied: 0, .. }));
+    }
+
+    #[test]
+    fn knows_modifier_keys() {
+        assert_eq!(modifier_bit(keys::LEFT_CONTROL), Some(modifiers::CONTROL));
+        assert_eq!(modifier_bit(keys::LEFT_META), Some(modifiers::META));
+        assert_eq!(modifier_bit(keys::A), None);
     }
 
     #[test]

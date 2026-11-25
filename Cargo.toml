@@ -4,7 +4,7 @@ members = [
   "crates/waystone-proto",
   "crates/waystone-rtc",
   "crates/waystoned",
-  "host/macos/waystone-host",
+  "host/waystone-host",
 ]
 
 [workspace.package]

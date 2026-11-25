@@ -10,18 +10,15 @@ use waystone_proto::identity::{Challenge, Identity};
 use waystone_proto::signal::{ByeReason, ClientMessage, ServerMessage, TurnCredentials};
 
 use crate::config::{Config, DeviceKey};
+use crate::platform;
 use crate::session::{Outcome, Request, Session};
 use crate::signal::Signal;
-use crate::system;
 
 /// Reconnects forever with capped backoff; returns only on a fatal error
 /// (the server no longer knows this machine).
 pub async fn run(config: Config, key: Arc<DeviceKey>) -> Result<()> {
-    if !system::input_permitted(true) {
-        warn!(
-            "Accessibility permission is missing: the stream will work but touches will not. \
-             Allow this binary in System Settings > Privacy & Security > Accessibility."
-        );
+    if !platform::input_permitted(true) {
+        warn!("{}", platform::INPUT_PERMISSION_HINT);
     }
     let mut failures = 0u32;
     loop {

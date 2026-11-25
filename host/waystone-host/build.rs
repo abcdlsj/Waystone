@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=swift");
+    println!("cargo:rerun-if-changed=src/platform/macos/swift");
     println!("cargo:rerun-if-changed=build.rs");
 
     // Only macOS can build the host agent; other targets get an empty archive so
@@ -21,8 +21,8 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
-    let mut sources: Vec<PathBuf> = std::fs::read_dir("swift")
-        .expect("swift/ holds the media layer")
+    let mut sources: Vec<PathBuf> = std::fs::read_dir("src/platform/macos/swift")
+        .expect("src/platform/macos/swift holds the media layer")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
         .collect();

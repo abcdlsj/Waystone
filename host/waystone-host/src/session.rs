@@ -19,10 +19,11 @@ use waystone_proto::signal::{ByeReason, RtcSignal, SessionControl, TurnCredentia
 use waystone_proto::{VideoCodec, Viewport};
 use waystone_rtc::engine::{sink, Engine, EngineConfig, Event, Role, TurnConfig};
 
-use crate::capture::{Capture, FrameSink};
+use crate::capture::FrameSink;
+use crate::display::Display;
 use crate::input::Injector;
 use crate::plan::{plan, StreamPlan};
-use crate::system::{self, Display, SpeakerMute};
+use crate::platform::{self, Capture, SpeakerMute};
 
 /// How long the media path may stay down before the session is given up
 /// (design doc 4.5, condition 2).
@@ -88,7 +89,7 @@ impl Session {
         stun: Option<&str>,
         turn: Option<&TurnCredentials>,
     ) -> Result<Session> {
-        let display = Display::main().context("no display is attached")?;
+        let display = platform::main_display().context("no display is attached")?;
         let plan = plan(&display, request.viewport.as_ref(), options.bitrate_budget);
         info!(
             "session {} for {}: {}x{}@{} {} at {} kbit/s",
@@ -316,7 +317,7 @@ impl Session {
         engine.shutdown();
         drop(_mute);
         if lock {
-            system::lock_screen();
+            platform::lock_screen();
         }
     }
 
@@ -330,14 +331,14 @@ impl Session {
         // about a second to come up and frames before the media sections
         // exist are dropped anyway.
         let (display, plan, codec, audio) = (
-            self.display.id,
+            self.display,
             self.plan,
             self.request.codec,
             self.request.audio,
         );
         let sink = self.sink.clone();
         self.starting = Some(tokio::spawn(async move {
-            Capture::start(display, &plan, codec, audio, sink).await
+            Capture::start(&display, &plan, codec, audio, sink).await
         }));
     }
 

@@ -18,7 +18,7 @@ Windows 被控端未开始。
 crates/waystone-proto     协议：设备身份、配对链接、JSON 信令、二进制输入帧（HID 键码）
 crates/waystone-rtc       传输：str0m 单所有者引擎 + sans-io STUN/TURN + C ABI（iOS 与 macOS 共用）
 crates/waystoned          服务端：HTTPS 面板 + WSS 信令 + 内嵌 TURN + SQLite
-host/macos/waystone-host  macOS 被控端：Rust 主体 + Swift 静态库（采集/编码/注入/系统）
+host/waystone-host        被控端：平台无关的会话/输入/信令 + src/platform/{macos,windows}
 client-ios                iOS 控制端：SwiftUI + VideoToolbox + Metal + AVAudioEngine
 docs/                     设计文档、本文件、验收报告与截图
 ```
