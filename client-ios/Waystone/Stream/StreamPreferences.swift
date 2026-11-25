@@ -64,6 +64,8 @@ final class StreamPreferences: ObservableObject {
     @Published var sound: Sound { didSet { save() } }
     @Published var touchMode: InputController.Mode { didSet { save() } }
     @Published var presetId: String { didSet { save() } }
+    /// Keeps the device screen awake while Waystone is open in the foreground.
+    @Published var preventSleep: Bool { didSet { save() } }
 
     var preset: HotkeyPreset { HotkeyPreset.named(presetId) }
 
@@ -76,6 +78,7 @@ final class StreamPreferences: ObservableObject {
         sound = defaults.string(forKey: Keys.sound).flatMap(Sound.init) ?? .auto
         touchMode = defaults.string(forKey: Keys.touchMode).flatMap(InputController.Mode.init) ?? .direct
         presetId = defaults.string(forKey: Keys.preset) ?? HotkeyPreset.cards.id
+        preventSleep = defaults.object(forKey: Keys.preventSleep) as? Bool ?? true
     }
 
     private func save() {
@@ -84,6 +87,7 @@ final class StreamPreferences: ObservableObject {
         defaults.set(sound.rawValue, forKey: Keys.sound)
         defaults.set(touchMode.rawValue, forKey: Keys.touchMode)
         defaults.set(presetId, forKey: Keys.preset)
+        defaults.set(preventSleep, forKey: Keys.preventSleep)
     }
 
     private enum Keys {
@@ -92,5 +96,6 @@ final class StreamPreferences: ObservableObject {
         static let sound = "stream.sound"
         static let touchMode = "stream.touchMode"
         static let preset = "stream.preset"
+        static let preventSleep = "app.preventSleep"
     }
 }

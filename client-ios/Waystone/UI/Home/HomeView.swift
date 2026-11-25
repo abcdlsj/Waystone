@@ -8,6 +8,7 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @State private var addingServer = false
+    @State private var showingSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +26,11 @@ struct HomeView: View {
         .background(WaystoneTheme.canvas.ignoresSafeArea())
         .sheet(isPresented: $addingServer) {
             PairingSheet()
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsSheet(preferences: model.preferences)
+                .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
         }
         .overlay(alignment: .bottom) { noticeOverlay }
@@ -50,26 +56,44 @@ struct HomeView: View {
 
                 Spacer()
 
-                Button {
-                    Haptics.tap()
-                    addingServer = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text("添加")
-                            .font(.system(size: 12, weight: .medium))
+                HStack(spacing: 8) {
+                    Button {
+                        Haptics.tap()
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(WaystoneTheme.textSecondary)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                            )
                     }
-                    .foregroundStyle(WaystoneTheme.textPrimary)
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
-                    )
+                    .buttonStyle(ConsoleButtonStyle())
+                    .accessibilityLabel("设置")
+
+                    Button {
+                        Haptics.tap()
+                        addingServer = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("添加")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(WaystoneTheme.textPrimary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                        )
+                    }
+                    .buttonStyle(ConsoleButtonStyle())
+                    .accessibilityLabel("添加服务器")
                 }
-                .buttonStyle(ConsoleButtonStyle())
-                .accessibilityLabel("添加服务器")
             }
             .padding(.horizontal, 18)
             .frame(height: 48)
@@ -537,5 +561,74 @@ struct NoticeCard: View {
                 )
         )
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+/// App-level settings sheet opened from the home screen top bar.
+private struct SettingsSheet: View {
+    @ObservedObject var preferences: StreamPreferences
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("设置")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(WaystoneTheme.textPrimary)
+                Spacer()
+                Button("完成") {
+                    Haptics.tap()
+                    dismiss()
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(WaystoneTheme.textSecondary)
+                .buttonStyle(ConsoleButtonStyle())
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 20)
+            .padding(.bottom, 14)
+
+            Rectangle()
+                .fill(WaystoneTheme.borderSubtle)
+                .frame(height: 0.75)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("电源与显示")
+                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(WaystoneTheme.textSecondary)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 18)
+
+                VStack(spacing: 0) {
+                    Rectangle().fill(WaystoneTheme.borderSubtle).frame(height: 0.75)
+
+                    HStack(alignment: .center, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("防止自动休眠")
+                                .font(.system(size: 14.5, weight: .medium))
+                                .foregroundStyle(WaystoneTheme.textPrimary)
+                            Text("应用在前台时保持屏幕常亮，避免串流或等待时自动锁屏。")
+                                .font(.system(size: 12))
+                                .foregroundStyle(WaystoneTheme.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer(minLength: 8)
+
+                        Toggle("", isOn: $preferences.preventSleep)
+                            .labelsHidden()
+                            .tint(WaystoneTheme.emerald)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+
+                    Rectangle().fill(WaystoneTheme.borderSubtle).frame(height: 0.75)
+                }
+                .background(WaystoneTheme.ledger)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .background(WaystoneTheme.canvas.ignoresSafeArea())
     }
 }

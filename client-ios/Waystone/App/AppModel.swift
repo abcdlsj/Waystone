@@ -1,5 +1,7 @@
+import Combine
 import Foundation
 import SwiftUI
+import UIKit
 
 /// The root of the app: enrolled servers, their live connections, pairing and
 /// the one stream that may be running.
@@ -28,6 +30,8 @@ final class AppModel: ObservableObject {
     private let store: InstanceStore
     private let identity: DeviceIdentity?
     private var sessionObservation: Task<Void, Never>?
+    private var sleepObservation: AnyCancellable?
+    private var isForeground = true
 
     init(store: InstanceStore? = nil) {
         let store = store ?? InstanceStore()
@@ -41,6 +45,10 @@ final class AppModel: ObservableObject {
         if let identity {
             pools = store.instances.map { PoolConnection(instance: $0, identity: identity) }
         }
+        sleepObservation = preferences.$preventSleep.sink { [weak self] prevent in
+            guard let self, self.isForeground else { return }
+            UIApplication.shared.isIdleTimerDisabled = prevent
+        }
     }
 
     var identityError: Bool { identity == nil }
@@ -52,11 +60,15 @@ final class AppModel: ObservableObject {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            isForeground = true
+            UIApplication.shared.isIdleTimerDisabled = preferences.preventSleep
             // `start` is a no-op for running connections; `reconnectNow`
             // skips the backoff of ones that are waiting to retry.
             pools.forEach { $0.start() }
             pools.forEach { $0.reconnectNow() }
         case .background:
+            isForeground = false
+            UIApplication.shared.isIdleTimerDisabled = false
             guard session == nil else { return }
             pools.forEach { $0.stop() }
         default:
