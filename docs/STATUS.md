@@ -4,13 +4,12 @@
 
 ## 1. 状态
 
-macOS 被控端 + iOS 控制端 + 自部署服务端的 MVP 闭环已完成：
+macOS 被控端 + Windows 被控端 + iOS 控制端 + 自部署服务端的完整闭环均已落地并在真机验证：
 
-- 配对、信令、WebRTC（直连优先，TURN 兜底）、音视频、双轨输入都已实现。
-- 设计文档 5.2–5.4 的手势、热键、悬浮球和弱网处理也已实现。
+- 配对、信令、WebRTC（IPv4/IPv6 直连、UPnP/PCP/NAT-PMP、NAT3↔NAT4 生日攻击端口碰撞打洞、TURN 兜底）、音视频、双轨输入都已实现。
+- Windows 被控端已落地：DXGI Desktop Duplication、GPU 零拷贝 HDR→SDR 色调映射（读取系统 SDR 亮度）、1 ms 帧调度、Media Foundation 硬编（HEVC/H.264）、WASAPI loopback Opus、托盘与 Session 0 服务/控制台 Worker 架构（支持 UAC/锁屏/管理员窗口）。
+- iOS 控制端已完成纯黑极简控制台 UI、手势、热键、悬浮球、弱网与解码恢复、实时 `P2P 直连` / `TURN 中继` + 分辨率/帧率显示，以及串流中热切换分辨率（`原生`/`720p`/`1080p`/`2K`）与帧率（`30`/`45`/`60 Hz`）。
 - 在模拟器上有一条端到端 UI 验收用例。
-
-Windows 被控端未开始。
 
 ## 2. 仓库结构
 
@@ -39,7 +38,9 @@ docs/                     设计文档、本文件、验收报告与截图
 
 ### 3.2 `waystone-rtc`
 
-- `engine.rs`：`Rtc` 只由一个任务持有，外部只发命令、只收事件。str0m 要求每次修改状态后都要 poll 到超时，这样安排就不可能违反这条规则。负责收集候选（host / srflx / relay），并有仅中继模式。走中继时把码率钳到上限。
+- `engine.rs`：`Rtc` 只由一个任务持有，外部只发命令、只收事件。str0m 要求每次修改状态后都要 poll 到超时，这样安排就不可能违反这条规则。负责收集候选（IPv4/IPv6 host / srflx / portmap / relay），并有仅中继模式。走中继时把码率钳到上限；直连时按全速码率运行。
+- `punch.rs`：NAT3↔NAT4 生日攻击端口碰撞打洞。当会话落入 TURN 中继且双方都有公网 IPv4 `srflx` 时，Host 端在主 socket 撒 768 个随机端口开 NAT3 洞，Controller 端分波开 128 个临时 socket 探测，命中后直接通过 `str0m` 热切换到 P2P 直连并解除中继限速。
+- `portmap.rs`：UPnP IGD / PCP / NAT-PMP 端口映射（主机端启用）。
 - `net.rs`：从 `recvmsg` 辅助数据读出目的地址。绑定 `0.0.0.0` 的 socket 不这样做，ICE 会把连通性检查当成非法包丢掉。
 - `stun.rs`、`turn.rs`：RFC 5389 编解码；TURN 分配状态机不持有 socket，所以能和 ICE 共用一个 UDP 端口。
 - `ffi.rs`：C ABI。控制事件用 JSON，媒体事件用 16 字节头加原始载荷；`ws_engine_stop` 返回后不再有回调。
@@ -119,9 +120,9 @@ xcodebuild -scheme Waystone -destination 'platform=iOS Simulator,name=<模拟器
 
 | 项 | 说明 |
 |---|---|
-| Windows 被控端 | 未开始：Session 0 服务 + 用户态采集进程、DXGI、NVENC/AMF/oneVPL、WASAPI loopback、UAC / 锁屏桌面切换、IddCx。协议和传输层直接复用，分层照搬 `host/macos` |
-| 虚拟显示器 | macOS 用真实屏幕比例，画面加黑边 |
-| 真机调参 | 手势阈值（160 ms / 8 pt / 双指 200 ms）、触控板加速曲线只在模拟器上跑过 |
+| Windows 虚拟显示器 | IddCx 虚拟显示器尚未实现（当前采集主物理屏并按比例缩放，支持热切分辨率） |
+| macOS 虚拟显示器 | macOS 用真实屏幕比例，画面加黑边 |
+| 持续真机调参 | 手势阈值与触控板加速曲线可根据更多真机游戏反馈继续微调 |
 
 ### 工程化
 
