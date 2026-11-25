@@ -5,8 +5,15 @@
 //! [`Session::finish`], which undoes all of it in a fixed order (design doc
 //! 4.5): release held input, stop capture, close the transport, restore the
 //! speakers, then lock the screen if asked to.
+//!
+//! On Windows, [`SessionMode::ConsoleWorker`] delegates capture, audio, input,
+//! speaker mute and screen locking to a privileged console-session worker
+//! spawned from the Session 0 service, while keeping the WebRTC engine and
+//! deterministic rollback inside Session 0.
 
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +39,18 @@ pub const RECONNECT_WINDOW: Duration = Duration::from_secs(10);
 /// MediaReady and a PLI tend to arrive within milliseconds, and each forced
 /// IDR is a 100-200 KB burst.
 const KEYFRAME_SPACING: Duration = Duration::from_millis(250);
+
+/// How a session accesses the desktop, audio and input subsystems.
+#[derive(Debug, Clone, Default)]
+pub enum SessionMode {
+    /// Capture, inject, mute and lock in-process (macOS and Windows foreground mode).
+    #[default]
+    Direct,
+    /// Delegate console-session media, input, mute and lock to a privileged
+    /// child process spawned in the active physical console session (Windows Session 0).
+    #[cfg(windows)]
+    ConsoleWorker { state_dir: PathBuf },
+}
 
 /// What the controller asked for in `SessionAccepted`.
 #[derive(Debug, Clone)]
@@ -60,20 +79,34 @@ pub enum Outcome {
     End(ByeReason),
 }
 
+enum SessionBackend {
+    Direct {
+        injector: Injector,
+        mute: Option<SpeakerMute>,
+        capture: Option<Capture>,
+        starting: Option<JoinHandle<Result<Capture>>>,
+    },
+    #[cfg(windows)]
+    Worker {
+        worker: Arc<platform::worker::WorkerSession>,
+        capture_active: bool,
+        starting: Option<JoinHandle<Result<()>>>,
+        dead_rx: mpsc::UnboundedReceiver<String>,
+    },
+}
+
 pub struct Session {
     pub id: String,
     controller: String,
     request: Request,
     display: Display,
     plan: StreamPlan,
+    bitrate_budget: u32,
     relay_ceiling: Option<u32>,
     engine: Engine,
     events: mpsc::UnboundedReceiver<Event>,
     sink: Arc<FrameSink>,
-    injector: Injector,
-    _mute: Option<SpeakerMute>,
-    capture: Option<Capture>,
-    starting: Option<JoinHandle<Result<Capture>>>,
+    backend: SessionBackend,
     offer_applied: bool,
     early_candidates: Vec<String>,
     relayed: bool,
@@ -86,10 +119,60 @@ impl Session {
     pub async fn start(
         request: Request,
         options: &Options,
+        mode: &SessionMode,
         stun: Option<&str>,
         turn: Option<&TurnCredentials>,
     ) -> Result<Session> {
-        let display = platform::main_display().context("no display is attached")?;
+        let (events_tx, events) = mpsc::unbounded_channel();
+
+        let (display, backend, engine_sink) = match mode {
+            SessionMode::Direct => {
+                let display = platform::main_display().context("no display is attached")?;
+                let injector = Injector::start(display);
+                let input = injector.sender();
+                let mute = options.mute_speakers.then(SpeakerMute::engage);
+                // Input skips the session loop: it goes straight to the injector
+                // thread from the engine's callback.
+                let engine_sink = sink(move |event| match event {
+                    Event::Input { data, .. } => input.submit(data),
+                    other => {
+                        let _ = events_tx.send(other);
+                    }
+                });
+                let backend = SessionBackend::Direct {
+                    injector,
+                    mute,
+                    capture: None,
+                    starting: None,
+                };
+                (display, backend, engine_sink)
+            }
+            #[cfg(windows)]
+            SessionMode::ConsoleWorker { state_dir } => {
+                let (worker, dead_rx) = platform::worker::WorkerSession::start(
+                    state_dir.clone(),
+                    options.mute_speakers,
+                )
+                .await
+                .context("starting privileged console worker")?;
+                let display = worker.display();
+                let input = worker.input_sender();
+                let engine_sink = sink(move |event| match event {
+                    Event::Input { data, .. } => input.submit(data),
+                    other => {
+                        let _ = events_tx.send(other);
+                    }
+                });
+                let backend = SessionBackend::Worker {
+                    worker: Arc::new(worker),
+                    capture_active: false,
+                    starting: None,
+                    dead_rx,
+                };
+                (display, backend, engine_sink)
+            }
+        };
+
         let plan = plan(&display, request.viewport.as_ref(), options.bitrate_budget);
         info!(
             "session {} for {}: {}x{}@{} {} at {} kbit/s",
@@ -102,19 +185,7 @@ impl Session {
             plan.bitrate / 1000
         );
 
-        let injector = Injector::start(display);
-        let input = injector.sender();
-        let (events_tx, events) = mpsc::unbounded_channel();
-        // Input skips the session loop: it goes straight to the injector
-        // thread from the engine's callback.
-        let sink = sink(move |event| match event {
-            Event::Input { data, .. } => input.submit(data),
-            other => {
-                let _ = events_tx.send(other);
-            }
-        });
-
-        let mut config = EngineConfig::new(Role::Host, sink)
+        let mut config = EngineConfig::new(Role::Host, engine_sink)
             .with_video_codec(request.codec)
             .with_port_mapping(true);
         if let Some(stun) = stun.and_then(resolve) {
@@ -141,14 +212,12 @@ impl Session {
             request,
             display,
             plan,
+            bitrate_budget: options.bitrate_budget,
             relay_ceiling,
             sink: FrameSink::new(Some(engine.clone())),
             engine,
             events,
-            injector,
-            _mute: options.mute_speakers.then(SpeakerMute::engage),
-            capture: None,
-            starting: None,
+            backend,
             offer_applied: false,
             early_candidates: Vec::new(),
             relayed: false,
@@ -184,18 +253,56 @@ impl Session {
         match control {
             SessionControl::RequestKeyframe => self.request_keyframe(),
             SessionControl::SetFrameRate { fps } => {
-                let fps = if fps >= 50 { 60 } else { 45 };
-                info!("frame rate {fps}");
-                self.plan.fps = fps;
-                if let Some(capture) = &self.capture {
-                    capture.set_frame_rate(fps);
+                let fps = Viewport {
+                    width: self.plan.width,
+                    height: self.plan.height,
+                    dpi: 0,
+                    fps,
                 }
+                .frame_rate_tier();
+                let updated = plan(
+                    &self.display,
+                    Some(&Viewport {
+                        width: self.plan.width,
+                        height: self.plan.height,
+                        dpi: 0,
+                        fps,
+                    }),
+                    self.bitrate_budget,
+                );
+                info!("frame rate {fps} ({} kbit/s)", updated.bitrate / 1000);
+                self.plan.fps = fps;
+                self.plan.bitrate = updated.bitrate;
+                self.apply_frame_rate(fps);
+                self.apply_bitrate(self.bitrate());
+            }
+            SessionControl::SetResolution { width, height } => {
+                let updated = plan(
+                    &self.display,
+                    Some(&Viewport {
+                        width,
+                        height,
+                        dpi: 0,
+                        fps: self.plan.fps,
+                    }),
+                    self.bitrate_budget,
+                );
+                if (updated.width, updated.height) == (self.plan.width, self.plan.height) {
+                    return;
+                }
+                info!(
+                    "resolution {}x{}@{} ({} kbit/s)",
+                    updated.width,
+                    updated.height,
+                    updated.fps,
+                    updated.bitrate / 1000
+                );
+                self.plan = updated;
+                self.apply_resolution(updated.width, updated.height, self.bitrate());
             }
             SessionControl::SetAudioEnabled { enabled } => {
                 self.request.audio = enabled;
-                if let Some(capture) = &self.capture {
-                    capture.set_audio(enabled);
-                }
+                self.apply_audio(enabled);
             }
             other => debug!("unsupported session control {other:?}"),
         }
@@ -207,42 +314,108 @@ impl Session {
     pub async fn next(&mut self) -> Outcome {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         loop {
-            tokio::select! {
-                event = self.events.recv() => match event {
-                    Some(event) => if let Some(outcome) = self.on_event(event) {
-                        return outcome;
-                    },
-                    None => return Outcome::End(ByeReason::HostError),
-                },
-                started = async { self.starting.as_mut().unwrap().await }, if self.starting.is_some() => {
-                    self.starting = None;
-                    match started {
-                        Ok(Ok(capture)) => {
-                            info!("capturing");
-                            capture.set_bitrate(self.bitrate());
-                            capture.set_audio(self.request.audio);
-                            self.capture = Some(capture);
-                            self.request_keyframe();
+            match &mut self.backend {
+                SessionBackend::Direct {
+                    capture, starting, ..
+                } => {
+                    tokio::select! {
+                        event = self.events.recv() => match event {
+                            Some(event) => if let Some(outcome) = self.on_event(event) {
+                                return outcome;
+                            },
+                            None => return Outcome::End(ByeReason::HostError),
+                        },
+                        started = async { starting.as_mut().unwrap().await }, if starting.is_some() => {
+                            *starting = None;
+                            match started {
+                                Ok(Ok(started_capture)) => {
+                                    info!("capturing");
+                                    let bitrate = match (self.relayed, self.relay_ceiling) {
+                                        (true, Some(ceiling)) if ceiling > 0 => self.plan.bitrate.min(ceiling),
+                                        _ => self.plan.bitrate,
+                                    };
+                                    started_capture.set_bitrate(bitrate);
+                                    started_capture.set_audio(self.request.audio);
+                                    *capture = Some(started_capture);
+                                    self.request_keyframe();
+                                }
+                                Ok(Err(error)) => {
+                                    warn!("capture failed: {error:#}");
+                                    return Outcome::End(ByeReason::HostError);
+                                }
+                                Err(error) => {
+                                    warn!("capture task failed: {error}");
+                                    return Outcome::End(ByeReason::HostError);
+                                }
+                            }
                         }
-                        Ok(Err(error)) => {
-                            warn!("capture failed: {error:#}");
-                            return Outcome::End(ByeReason::HostError);
-                        }
-                        Err(error) => {
-                            warn!("capture task failed: {error}");
-                            return Outcome::End(ByeReason::HostError);
+                        _ = tick.tick() => {
+                            if let Some(since) = self.down_since {
+                                if since.elapsed() > RECONNECT_WINDOW {
+                                    warn!("media path down for {:?}, giving up", since.elapsed());
+                                    return Outcome::End(ByeReason::NetworkTimeout);
+                                }
+                            }
+                            if self.keyframe_owed {
+                                self.request_keyframe();
+                            }
                         }
                     }
                 }
-                _ = tick.tick() => {
-                    if let Some(since) = self.down_since {
-                        if since.elapsed() > RECONNECT_WINDOW {
-                            warn!("media path down for {:?}, giving up", since.elapsed());
-                            return Outcome::End(ByeReason::NetworkTimeout);
+                #[cfg(windows)]
+                SessionBackend::Worker {
+                    worker,
+                    capture_active,
+                    starting,
+                    dead_rx,
+                } => {
+                    tokio::select! {
+                        event = self.events.recv() => match event {
+                            Some(event) => if let Some(outcome) = self.on_event(event) {
+                                return outcome;
+                            },
+                            None => return Outcome::End(ByeReason::HostError),
+                        },
+                        started = async { starting.as_mut().unwrap().await }, if starting.is_some() => {
+                            *starting = None;
+                            match started {
+                                Ok(Ok(())) => {
+                                    info!("capturing (privileged console worker)");
+                                    let bitrate = match (self.relayed, self.relay_ceiling) {
+                                        (true, Some(ceiling)) if ceiling > 0 => self.plan.bitrate.min(ceiling),
+                                        _ => self.plan.bitrate,
+                                    };
+                                    worker.set_bitrate(bitrate);
+                                    worker.set_audio(self.request.audio);
+                                    *capture_active = true;
+                                    self.request_keyframe();
+                                }
+                                Ok(Err(error)) => {
+                                    warn!("worker capture failed: {error:#}");
+                                    return Outcome::End(ByeReason::HostError);
+                                }
+                                Err(error) => {
+                                    warn!("worker capture task failed: {error}");
+                                    return Outcome::End(ByeReason::HostError);
+                                }
+                            }
                         }
-                    }
-                    if self.keyframe_owed {
-                        self.request_keyframe();
+                        dead = dead_rx.recv() => {
+                            let reason = dead.unwrap_or_else(|| "console worker exited".into());
+                            warn!("console worker failed mid-session: {reason}");
+                            return Outcome::End(ByeReason::HostError);
+                        }
+                        _ = tick.tick() => {
+                            if let Some(since) = self.down_since {
+                                if since.elapsed() > RECONNECT_WINDOW {
+                                    warn!("media path down for {:?}, giving up", since.elapsed());
+                                    return Outcome::End(ByeReason::NetworkTimeout);
+                                }
+                            }
+                            if self.keyframe_owed {
+                                self.request_keyframe();
+                            }
+                        }
                     }
                 }
             }
@@ -280,9 +453,8 @@ impl Session {
                 if relayed != self.relayed {
                     self.relayed = relayed;
                     info!("path is {}", if relayed { "relayed" } else { "direct" });
-                    if let Some(capture) = &self.capture {
-                        capture.set_bitrate(self.bitrate());
-                    }
+                    let bitrate = self.bitrate();
+                    self.apply_bitrate(bitrate);
                 }
             }
             Event::Closed(reason) => {
@@ -297,6 +469,9 @@ impl Session {
     // MARK: teardown
 
     /// Rolls the machine back to how it was before the session.
+    ///
+    /// Order is fixed (design doc 4.5): release held input -> stop capture ->
+    /// close transport -> restore speakers -> lock screen (if requested).
     pub fn finish(self, lock: bool) {
         let (video, audio) = self.sink.counts();
         info!(
@@ -304,34 +479,50 @@ impl Session {
             self.id
         );
         let Session {
-            injector,
-            capture,
-            starting,
-            engine,
-            _mute,
-            ..
+            engine, backend, ..
         } = self;
-        drop(injector);
-        if let Some(starting) = starting {
-            starting.abort();
-        }
-        drop(capture);
-        engine.shutdown();
-        drop(_mute);
-        if lock {
-            platform::lock_screen();
+        match backend {
+            SessionBackend::Direct {
+                injector,
+                mute,
+                capture,
+                starting,
+            } => {
+                drop(injector);
+                if let Some(starting) = starting {
+                    starting.abort();
+                }
+                drop(capture);
+                engine.shutdown();
+                drop(mute);
+                if lock {
+                    platform::lock_screen();
+                }
+            }
+            #[cfg(windows)]
+            SessionBackend::Worker {
+                worker, starting, ..
+            } => {
+                worker.release_input_blocking();
+                if let Some(starting) = starting {
+                    starting.abort();
+                }
+                worker.stop_capture_blocking();
+                engine.shutdown();
+                worker.restore_speakers_blocking();
+                if lock {
+                    worker.lock_screen_blocking();
+                }
+                if let Ok(owned) = Arc::try_unwrap(worker) {
+                    owned.shutdown_blocking();
+                }
+            }
         }
     }
 
     // MARK: helpers
 
     fn start_capture(&mut self) {
-        if self.capture.is_some() || self.starting.is_some() {
-            return;
-        }
-        // Started on the offer rather than on SessionAccepted: capture takes
-        // about a second to come up and frames before the media sections
-        // exist are dropped anyway.
         let (display, plan, codec, audio) = (
             self.display,
             self.plan,
@@ -339,16 +530,53 @@ impl Session {
             self.request.audio,
         );
         let sink = self.sink.clone();
-        self.starting = Some(tokio::spawn(async move {
-            Capture::start(&display, &plan, codec, audio, sink).await
-        }));
+        match &mut self.backend {
+            SessionBackend::Direct {
+                capture, starting, ..
+            } => {
+                if capture.is_some() || starting.is_some() {
+                    return;
+                }
+                // Started on the offer rather than on SessionAccepted: capture takes
+                // about a second to come up and frames before the media sections
+                // exist are dropped anyway.
+                *starting = Some(tokio::spawn(async move {
+                    Capture::start(&display, &plan, codec, audio, sink).await
+                }));
+            }
+            #[cfg(windows)]
+            SessionBackend::Worker {
+                worker,
+                capture_active,
+                starting,
+                ..
+            } => {
+                if *capture_active || starting.is_some() {
+                    return;
+                }
+                let worker = worker.clone();
+                *starting = Some(tokio::spawn(async move {
+                    worker
+                        .start_capture(display.id, plan, codec, audio, sink)
+                        .await
+                }));
+            }
+        }
+    }
+
+    fn capture_is_running(&self) -> bool {
+        match &self.backend {
+            SessionBackend::Direct { capture, .. } => capture.is_some(),
+            #[cfg(windows)]
+            SessionBackend::Worker { capture_active, .. } => *capture_active,
+        }
     }
 
     fn request_keyframe(&mut self) {
-        let Some(capture) = &self.capture else {
+        if !self.capture_is_running() {
             // The first frame of a new capture is a keyframe anyway.
             return;
-        };
+        }
         if self
             .last_keyframe
             .is_some_and(|at| at.elapsed() < KEYFRAME_SPACING)
@@ -359,7 +587,102 @@ impl Session {
         }
         self.keyframe_owed = false;
         self.last_keyframe = Some(Instant::now());
-        capture.request_keyframe();
+        match &self.backend {
+            SessionBackend::Direct { capture, .. } => {
+                if let Some(capture) = capture {
+                    capture.request_keyframe();
+                }
+            }
+            #[cfg(windows)]
+            SessionBackend::Worker { worker, .. } => worker.request_keyframe(),
+        }
+    }
+
+    fn apply_bitrate(&self, bitrate: u32) {
+        match &self.backend {
+            SessionBackend::Direct { capture, .. } => {
+                if let Some(capture) = capture {
+                    capture.set_bitrate(bitrate);
+                }
+            }
+            #[cfg(windows)]
+            SessionBackend::Worker {
+                worker,
+                capture_active,
+                ..
+            } => {
+                if *capture_active {
+                    worker.set_bitrate(bitrate);
+                }
+            }
+        }
+    }
+
+    fn apply_frame_rate(&self, fps: u32) {
+        match &self.backend {
+            SessionBackend::Direct { capture, .. } => {
+                if let Some(capture) = capture {
+                    capture.set_frame_rate(fps);
+                }
+            }
+            #[cfg(windows)]
+            SessionBackend::Worker {
+                worker,
+                capture_active,
+                ..
+            } => {
+                if *capture_active {
+                    worker.set_frame_rate(fps);
+                }
+            }
+        }
+    }
+
+    fn apply_resolution(&mut self, width: u32, height: u32, bitrate: u32) {
+        let mut restart = false;
+        match &mut self.backend {
+            SessionBackend::Direct { capture, .. } => {
+                if let Some(active) = capture {
+                    if !active.set_resolution(width, height, bitrate) {
+                        *capture = None;
+                        restart = true;
+                    }
+                }
+            }
+            #[cfg(windows)]
+            SessionBackend::Worker {
+                worker,
+                capture_active,
+                ..
+            } => {
+                if *capture_active {
+                    worker.set_resolution(width, height, bitrate);
+                }
+            }
+        }
+        if restart {
+            self.start_capture();
+        }
+    }
+
+    fn apply_audio(&self, enabled: bool) {
+        match &self.backend {
+            SessionBackend::Direct { capture, .. } => {
+                if let Some(capture) = capture {
+                    capture.set_audio(enabled);
+                }
+            }
+            #[cfg(windows)]
+            SessionBackend::Worker {
+                worker,
+                capture_active,
+                ..
+            } => {
+                if *capture_active {
+                    worker.set_audio(enabled);
+                }
+            }
+        }
     }
 
     fn bitrate(&self) -> u32 {

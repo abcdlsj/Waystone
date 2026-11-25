@@ -4,9 +4,10 @@
 //! absolute coordinates normalized over the whole virtual desktop, so every
 //! monitor layout works. Keys go as scan codes (see `keymap`).
 
+use std::cell::Cell;
 use std::mem::size_of;
 
-use tracing::debug;
+use tracing::{debug, info};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE,
@@ -19,8 +20,31 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
+use super::desktop::{self, SwitchOutcome};
 use super::keymap::{scan_code, ScanCode};
 use crate::input::Action;
+
+thread_local! {
+    /// Tracks the last desktop generation this input thread synced to.
+    static SEEN_DESKTOP_GEN: Cell<u64> = const { Cell::new(u64::MAX) };
+}
+
+fn ensure_input_desktop() {
+    let gen = desktop::desktop_generation();
+    let stale = SEEN_DESKTOP_GEN.with(|cell| {
+        if cell.get() != gen {
+            cell.set(gen);
+            true
+        } else {
+            false
+        }
+    });
+    if stale {
+        if let SwitchOutcome::Switched(name) = desktop::sync_thread_to_input_desktop() {
+            info!("input thread switched to desktop {name}");
+        }
+    }
+}
 
 const XBUTTON1: u32 = 0x0001;
 const XBUTTON2: u32 = 0x0002;
@@ -32,6 +56,7 @@ const WHEEL_PER_PIXEL: f64 = 120.0 / 48.0;
 const MODIFIER_KEYS: [(u8, u32); 4] = [(0x01, 0xe1), (0x02, 0xe0), (0x04, 0xe2), (0x08, 0xe3)];
 
 pub fn post(action: &Action) {
+    ensure_input_desktop();
     match action {
         Action::Move { x, y, .. } => send(&[mouse(Some((*x, *y)), 0, MOUSEEVENTF_MOVE)]),
         Action::Button {
@@ -97,7 +122,15 @@ fn send(inputs: &[INPUT]) {
     if inputs.is_empty() {
         return;
     }
-    let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+    let mut sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+    if sent as usize != inputs.len() {
+        // A desktop transition (UAC / Winlogon) may have occurred before the
+        // watcher observed it; re-attach the input thread and retry once.
+        if let SwitchOutcome::Switched(name) = desktop::sync_thread_to_input_desktop() {
+            info!("input thread re-attached to desktop {name}, retrying SendInput");
+            sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+        }
+    }
     if sent as usize != inputs.len() {
         // Blocked by UIPI (an elevated window has focus) or the desktop is
         // not ours (lock screen, UAC prompt).

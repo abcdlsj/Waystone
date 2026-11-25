@@ -128,6 +128,10 @@ impl Capture {
     pub fn set_audio(&self, enabled: bool) {
         unsafe { ffi::ws_capture_set_audio(self.handle, enabled) }
     }
+
+    pub fn set_resolution(&self, _width: u32, _height: u32, _bitrate: u32) -> bool {
+        false
+    }
 }
 
 impl Drop for Capture {

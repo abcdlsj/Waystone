@@ -14,11 +14,17 @@ pub enum MediaKind {
     Audio,
 }
 
+/// Custom sink target used by the Windows console worker to forward encoded
+/// frames over the local Named Pipe instead of directly into an in-process engine.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub type FrameCallback = Arc<dyn Fn(MediaKind, &[u8], u64) + Send + Sync>;
+
 /// Where encoded frames go. Lives as long as the capture session that calls
 /// into it, and converts host clock timestamps into RTP time.
 #[derive(Default)]
 pub struct FrameSink {
     engine: Mutex<Option<Engine>>,
+    callback: Option<FrameCallback>,
     video_origin: Mutex<Option<u64>>,
     audio_origin: Mutex<Option<u64>>,
     video_frames: AtomicU64,
@@ -29,6 +35,15 @@ impl FrameSink {
     pub fn new(engine: Option<Engine>) -> Arc<FrameSink> {
         Arc::new(FrameSink {
             engine: Mutex::new(engine),
+            callback: None,
+            ..FrameSink::default()
+        })
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn with_callback(callback: FrameCallback) -> Arc<FrameSink> {
+        Arc::new(FrameSink {
+            callback: Some(callback),
             ..FrameSink::default()
         })
     }
@@ -49,6 +64,10 @@ impl FrameSink {
             MediaKind::Audio => (&self.audio_origin, &self.audio_packets, 48),
         };
         counter.fetch_add(1, Ordering::Relaxed);
+        if let Some(callback) = &self.callback {
+            callback(kind, data, micros);
+            return;
+        }
         let rtp_time = rtp_time(origin, micros, clock_khz);
         let Some(engine) = self.engine.lock().unwrap().clone() else {
             return;
@@ -89,5 +108,25 @@ mod tests {
         sink.deliver(MediaKind::Video, b"frame", 1);
         sink.deliver(MediaKind::Audio, b"packet", 1);
         assert_eq!(sink.counts(), (1, 1));
+    }
+
+    #[test]
+    fn callback_sink_forwards_frames_and_counts() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let sink = FrameSink::with_callback(Arc::new(move |kind, data, micros| {
+            seen_cb.lock().unwrap().push((kind, data.to_vec(), micros));
+        }));
+        sink.deliver(MediaKind::Video, b"nalu", 42);
+        sink.deliver(MediaKind::Audio, b"opus", 84);
+        assert_eq!(sink.counts(), (1, 1));
+        let records = seen.lock().unwrap();
+        assert_eq!(
+            *records,
+            vec![
+                (MediaKind::Video, b"nalu".to_vec(), 42),
+                (MediaKind::Audio, b"opus".to_vec(), 84),
+            ]
+        );
     }
 }

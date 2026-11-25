@@ -1,9 +1,11 @@
-//! The notification area icon: how a Windows user runs the host.
+//! The notification area icon: how a Windows user observes and steers the host.
 //!
-//! The UI thread owns a hidden window, the icon and the menu; the agent runs
-//! on a Tokio runtime and reports back by queueing [`Event`]s and posting
-//! [`WM_UPDATE`]. Everything the menu changes is saved to `config.json` and
-//! sent to the agent, so it holds from the next session on.
+//! When the privileged Session 0 Windows service (`WaystoneHost`) is installed
+//! and running, the tray operates as a lightweight control client over the local
+//! Named Pipe (`CONTROL_PIPE_NAME`) so there is never a duplicate signaling
+//! connection or device-identity conflict. When the service is not installed,
+//! the tray runs the agent in-process and offers one-click installation of the
+//! privileged service.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -21,7 +23,7 @@ use windows::Win32::Foundation::{
     WPARAM,
 };
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
-use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::Registry::{
@@ -37,9 +39,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use super::system::input_permitted;
+use super::service::{self, ScmStatus};
+use super::system::{self, input_permitted};
 use crate::agent::{self, Command, Status};
 use crate::config::{Config, DeviceKey};
+use crate::ipc::{
+    read_json_frame, ControlRequest, ControlResponse, ServiceAgentStatus, ServiceSnapshot,
+};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_UPDATE: u32 = WM_APP + 2;
@@ -56,15 +62,31 @@ mod item {
     pub const LOCK: usize = 20;
     pub const MUTE: usize = 21;
     pub const AUTOSTART: usize = 22;
-    pub const ELEVATE: usize = 30;
-    pub const LOG: usize = 31;
+    pub const INSTALL_SERVICE: usize = 30;
+    pub const START_SERVICE: usize = 31;
+    pub const UNINSTALL_SERVICE: usize = 32;
+    pub const ELEVATE: usize = 33;
+    pub const LOG: usize = 34;
     pub const QUIT: usize = 40;
 }
 
-/// What other threads tell the UI thread.
+/// Operating mode of the tray process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Service is not installed: tray runs the agent in-process.
+    Standalone,
+    /// Service is installed in SCM, currently stopped.
+    ServiceStopped,
+    /// Service is running in Session 0: tray is a lightweight control client.
+    ServiceClient,
+}
+
+/// What background tasks report back to the UI thread.
 enum Event {
     Status(Status),
     Paired(Config),
+    ServiceSnapshot(ServiceSnapshot),
+    ScmChanged(ScmStatus),
     Notice {
         title: String,
         text: String,
@@ -99,8 +121,12 @@ struct App {
     dir: PathBuf,
     runtime: Runtime,
     mailbox: Mailbox,
+    mode: Mode,
     config: Option<Config>,
+    service_snapshot: Option<ServiceSnapshot>,
     agent: Option<(JoinHandle<()>, UnboundedSender<Command>)>,
+    service_sub: Option<JoinHandle<()>>,
+    scm_watcher: Option<JoinHandle<()>>,
     status: Status,
     icons: Icons,
     taskbar_created: u32,
@@ -116,11 +142,17 @@ pub fn run(dir: &Path) -> Result<()> {
         message_box("Waystone 已经在运行，图标在任务栏右下角的通知区域。");
         return Ok(());
     };
-    init_logging(dir);
+    let initial_scm = service::query_scm_status();
+    let initial_mode = mode_from_scm(initial_scm);
+    init_logging(dir, initial_mode == Mode::Standalone);
     // No console to print to, and a panic in the window procedure aborts:
     // the log is the only place that can say what went wrong.
     std::panic::set_hook(Box::new(|panic| tracing::error!("{panic}")));
-    info!("tray starting, state in {}", dir.display());
+    info!(
+        "tray starting in {:?} mode, state in {}",
+        initial_mode,
+        dir.display()
+    );
 
     let window = create_window()?;
     let mailbox = Mailbox {
@@ -133,8 +165,12 @@ pub fn run(dir: &Path) -> Result<()> {
         dir: dir.to_path_buf(),
         runtime: Runtime::new().context("starting the runtime")?,
         mailbox,
+        mode: initial_mode,
         config,
+        service_snapshot: None,
         agent: None,
+        service_sub: None,
+        scm_watcher: None,
         status: Status::Connecting,
         icons: Icons::load(),
         taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
@@ -143,19 +179,8 @@ pub fn run(dir: &Path) -> Result<()> {
     APP.with(|cell| *cell.borrow_mut() = Some(app));
     with_app(|app| {
         app.add_icon();
-        if app.config.is_some() {
-            app.start_agent();
-        } else {
-            app.status = Status::Offline {
-                reason: "还没有配对".into(),
-            };
-            app.refresh();
-            app.notify(
-                "Waystone 还没有配对",
-                "在服务端面板里为这台电脑生成配对链接并复制，然后在托盘菜单选「从剪贴板配对」。",
-                false,
-            );
-        }
+        app.start_scm_watcher(initial_scm);
+        app.apply_mode(initial_mode, true);
     });
 
     let mut message = MSG::default();
@@ -173,6 +198,14 @@ pub fn run(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn mode_from_scm(scm: ScmStatus) -> Mode {
+    match scm {
+        ScmStatus::Running | ScmStatus::StartPending => Mode::ServiceClient,
+        ScmStatus::Stopped | ScmStatus::StopPending | ScmStatus::Other(_) => Mode::ServiceStopped,
+        ScmStatus::NotInstalled => Mode::Standalone,
+    }
+}
+
 /// Runs `f` on the app. `None` while the app is already borrowed: menus,
 /// UAC and shell calls run nested message loops that re-enter the window
 /// procedure, and a panic there would abort the process.
@@ -181,6 +214,110 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 impl App {
+    fn start_scm_watcher(&mut self, initial: ScmStatus) {
+        let mailbox = self.mailbox.clone();
+        self.scm_watcher = Some(self.runtime.spawn(async move {
+            let mut last = initial;
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let current = tokio::task::spawn_blocking(service::query_scm_status)
+                    .await
+                    .unwrap_or(last);
+                if current != last {
+                    last = current;
+                    mailbox.post(Event::ScmChanged(current));
+                }
+            }
+        }));
+    }
+
+    fn apply_mode(&mut self, new_mode: Mode, initial: bool) {
+        if !initial && self.mode == new_mode {
+            return;
+        }
+        info!("tray switching mode {:?} -> {:?}", self.mode, new_mode);
+        self.mode = new_mode;
+
+        // Tear down old mode tasks before starting the new one.
+        if new_mode != Mode::Standalone {
+            self.stop_standalone_agent();
+        }
+        if new_mode != Mode::ServiceClient {
+            if let Some(sub) = self.service_sub.take() {
+                sub.abort();
+            }
+            self.service_snapshot = None;
+        }
+
+        match new_mode {
+            Mode::ServiceClient => {
+                self.status = Status::Connecting;
+                self.refresh();
+                self.start_service_subscription();
+            }
+            Mode::ServiceStopped => {
+                self.status = Status::Offline {
+                    reason: "系统服务已停止".into(),
+                };
+                self.refresh();
+            }
+            Mode::Standalone => {
+                self.config = Config::load(&self.dir.join("config.json")).ok();
+                if self.config.is_some() {
+                    self.start_agent();
+                } else {
+                    self.status = Status::Offline {
+                        reason: "还没有配对".into(),
+                    };
+                    self.refresh();
+                    if initial {
+                        self.notify(
+                            "Waystone 还没有配对",
+                            "在服务端面板里为这台电脑生成配对链接并复制，然后在托盘菜单选「从剪贴板配对」。",
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn start_service_subscription(&mut self) {
+        if let Some(sub) = self.service_sub.take() {
+            sub.abort();
+        }
+        let mailbox = self.mailbox.clone();
+        self.service_sub = Some(self.runtime.spawn(async move {
+            loop {
+                match service::subscribe_control_events().await {
+                    Ok(mut pipe) => loop {
+                        match read_json_frame::<ControlResponse, _>(&mut pipe).await {
+                            Ok(ControlResponse::Snapshot(snap)) => {
+                                mailbox.post(Event::ServiceSnapshot(snap));
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                warn!("service control pipe disconnected: {error:#}");
+                                break;
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        warn!("connecting to service control pipe: {error:#}");
+                    }
+                }
+                let scm = tokio::task::spawn_blocking(service::query_scm_status)
+                    .await
+                    .unwrap_or(ScmStatus::Stopped);
+                if !scm.is_running() {
+                    mailbox.post(Event::ScmChanged(scm));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }));
+    }
+
     fn start_agent(&mut self) {
         let Some(config) = self.config.clone() else {
             return;
@@ -192,9 +329,7 @@ impl App {
                 return;
             }
         };
-        if let Some((task, _)) = self.agent.take() {
-            task.abort();
-        }
+        self.stop_standalone_agent();
         let (commands, receiver) = unbounded_channel();
         let mailbox = self.mailbox.clone();
         let report: agent::Reporter = Arc::new(move |status| mailbox.post(Event::Status(status)));
@@ -210,26 +345,65 @@ impl App {
         self.agent = Some((task, commands));
     }
 
+    fn stop_standalone_agent(&mut self) {
+        if let Some((task, commands)) = self.agent.take() {
+            let _ = commands.send(Command::Shutdown);
+            task.abort();
+        }
+    }
+
     fn send(&self, command: Command) {
         if let Some((_, commands)) = &self.agent {
             let _ = commands.send(command);
         }
     }
 
+    fn send_service_request(&self, request: ControlRequest, error_title: &'static str) {
+        let mailbox = self.mailbox.clone();
+        self.runtime.spawn(async move {
+            match service::send_control_request(request).await {
+                Ok(ControlResponse::Error { message }) => mailbox.post(Event::Notice {
+                    title: error_title.into(),
+                    text: message,
+                    warning: true,
+                }),
+                Ok(ControlResponse::Snapshot(snap)) => {
+                    mailbox.post(Event::ServiceSnapshot(snap));
+                }
+                Ok(ControlResponse::Ok) => {}
+                Err(error) => mailbox.post(Event::Notice {
+                    title: error_title.into(),
+                    text: format!("{error:#}"),
+                    warning: true,
+                }),
+            }
+        });
+    }
+
     fn handle(&mut self, event: Event) {
         match event {
             Event::Status(status) => {
-                if let Status::Streaming { controller } = &status {
-                    if !matches!(self.status, Status::Streaming { .. }) {
-                        self.notify(
-                            "Waystone 串流已开始",
-                            &format!("{controller} 正在查看并控制这台电脑。"),
-                            false,
-                        );
-                    }
+                if self.mode != Mode::Standalone {
+                    return;
                 }
-                self.status = status;
-                self.refresh();
+                self.update_status(status);
+            }
+            Event::ServiceSnapshot(snap) => {
+                if self.mode != Mode::ServiceClient {
+                    return;
+                }
+                let next_status = match &snap.status {
+                    ServiceAgentStatus::NotPaired => Status::Offline {
+                        reason: "还没有配对".into(),
+                    },
+                    other => other.to_agent_status(),
+                };
+                self.service_snapshot = Some(snap);
+                self.update_status(next_status);
+            }
+            Event::ScmChanged(scm) => {
+                let target = mode_from_scm(scm);
+                self.apply_mode(target, false);
             }
             Event::Paired(config) => {
                 self.notify(
@@ -238,7 +412,9 @@ impl App {
                     false,
                 );
                 self.config = Some(config);
-                self.start_agent();
+                if self.mode == Mode::Standalone {
+                    self.start_agent();
+                }
             }
             Event::Notice {
                 title,
@@ -248,40 +424,127 @@ impl App {
         }
     }
 
+    fn update_status(&mut self, status: Status) {
+        if let Status::Streaming { controller } = &status {
+            if !matches!(self.status, Status::Streaming { .. }) {
+                self.notify(
+                    "Waystone 串流已开始",
+                    &format!("{controller} 正在查看并控制这台电脑。"),
+                    false,
+                );
+            }
+        }
+        self.status = status;
+        self.refresh();
+    }
+
     fn command(&mut self, id: usize) {
         match id {
-            item::END_SESSION => self.send(Command::EndSession),
+            item::END_SESSION => match self.mode {
+                Mode::ServiceClient => {
+                    self.send_service_request(ControlRequest::EndSession, "断开串流失败");
+                }
+                Mode::Standalone => self.send(Command::EndSession),
+                Mode::ServiceStopped => {}
+            },
             item::PAIR => self.pair_from_clipboard(),
             item::LOCK | item::MUTE => {
-                let Some(config) = self.config.as_mut() else {
-                    return;
-                };
+                let (mut lock, mut mute) = self.current_settings();
                 if id == item::LOCK {
-                    config.lock_on_disconnect = !config.lock_on_disconnect;
+                    lock = !lock;
                 } else {
-                    config.mute_speakers = !config.mute_speakers;
+                    mute = !mute;
                 }
-                if let Err(error) = config.save(&self.dir.join("config.json")) {
-                    warn!("saving settings: {error:#}");
+                match self.mode {
+                    Mode::ServiceClient => {
+                        self.send_service_request(
+                            ControlRequest::UpdateSettings {
+                                lock_on_disconnect: lock,
+                                mute_speakers: mute,
+                            },
+                            "更新设置失败",
+                        );
+                    }
+                    Mode::Standalone => {
+                        let Some(config) = self.config.as_mut() else {
+                            return;
+                        };
+                        config.lock_on_disconnect = lock;
+                        config.mute_speakers = mute;
+                        if let Err(error) = config.save(&self.dir.join("config.json")) {
+                            warn!("saving settings: {error:#}");
+                        }
+                        self.send(Command::Settings {
+                            lock_on_disconnect: lock,
+                            mute_speakers: mute,
+                        });
+                    }
+                    Mode::ServiceStopped => {}
                 }
-                let command = Command::Settings {
-                    lock_on_disconnect: config.lock_on_disconnect,
-                    mute_speakers: config.mute_speakers,
-                };
-                self.send(command);
             }
             item::AUTOSTART => {
                 if let Err(error) = set_autostart(!autostart_enabled()) {
                     self.notify("无法修改开机自启", &format!("{error:#}"), true);
                 }
             }
+            item::INSTALL_SERVICE => {
+                // Stop any standalone agent first so the newly installed service
+                // takes over the signaling session cleanly.
+                self.stop_standalone_agent();
+                if !run_elevated_subcommand("service install") {
+                    if self.mode == Mode::Standalone && self.config.is_some() {
+                        self.start_agent();
+                    }
+                }
+            }
+            item::START_SERVICE => {
+                let _ = run_elevated_subcommand("service start");
+            }
+            item::UNINSTALL_SERVICE => {
+                let _ = run_elevated_subcommand("service uninstall");
+            }
             item::ELEVATE => self.restart_elevated(),
             item::LOG => {
-                let log = HSTRING::from(self.dir.join("host.log").as_os_str());
+                let host_log = self.dir.join("host.log");
+                let log_path = if host_log.exists() {
+                    host_log
+                } else {
+                    self.dir.join("tray.log")
+                };
+                let log = HSTRING::from(log_path.as_os_str());
                 unsafe { ShellExecuteW(None, w!("open"), &log, None, None, SW_SHOWNORMAL) };
             }
             item::QUIT => unsafe { PostQuitMessage(0) },
             _ => {}
+        }
+    }
+
+    fn current_settings(&self) -> (bool, bool) {
+        if let Some(snap) = &self.service_snapshot {
+            (snap.lock_on_disconnect, snap.mute_speakers)
+        } else if let Some(config) = &self.config {
+            (config.lock_on_disconnect, config.mute_speakers)
+        } else {
+            (true, true)
+        }
+    }
+
+    fn is_paired(&self) -> bool {
+        if let Some(snap) = &self.service_snapshot {
+            snap.paired
+        } else {
+            self.config.is_some()
+        }
+    }
+
+    fn display_name(&self) -> &str {
+        if let Some(snap) = &self.service_snapshot {
+            snap.name.as_deref().unwrap_or("未配对")
+        } else {
+            self.config
+                .as_ref()
+                .map(|c| c.name.as_str())
+                .unwrap_or("未配对")
         }
     }
 
@@ -294,6 +557,36 @@ impl App {
                 "在服务端面板为这台电脑（被控端）生成配对链接，复制后再试。",
                 true,
             );
+            return;
+        }
+        if self.mode == Mode::ServiceClient {
+            let name = self.service_snapshot.as_ref().and_then(|s| s.name.clone());
+            let mailbox = self.mailbox.clone();
+            self.runtime.spawn(async move {
+                match service::send_control_request(ControlRequest::Pair { uri: link, name }).await
+                {
+                    Ok(ControlResponse::Snapshot(snap)) => {
+                        let shown = snap.name.clone().unwrap_or_else(Config::default_name);
+                        mailbox.post(Event::ServiceSnapshot(snap));
+                        mailbox.post(Event::Notice {
+                            title: "配对成功".into(),
+                            text: format!("这台电脑以「{shown}」加入了设备池。"),
+                            warning: false,
+                        });
+                    }
+                    Ok(ControlResponse::Error { message }) => mailbox.post(Event::Notice {
+                        title: "配对失败".into(),
+                        text: message,
+                        warning: true,
+                    }),
+                    Ok(ControlResponse::Ok) => {}
+                    Err(error) => mailbox.post(Event::Notice {
+                        title: "配对失败".into(),
+                        text: format!("{error:#}"),
+                        warning: true,
+                    }),
+                }
+            });
             return;
         }
         let name = self
@@ -314,26 +607,27 @@ impl App {
         });
     }
 
-    /// Hands over to an elevated copy, which can control elevated windows.
+    /// Hands over to an elevated copy, which can control elevated windows in standalone mode.
     fn restart_elevated(&mut self) {
-        // The new instance must be able to claim the single-instance mutex.
         if let Some(mutex) = self.single_instance.take() {
             let _ = unsafe { CloseHandle(mutex) };
         }
-        let exe = HSTRING::from(current_exe().as_os_str());
-        let result =
-            unsafe { ShellExecuteW(None, w!("runas"), &exe, w!("tray"), None, SW_SHOWNORMAL) };
-        if result.0 as isize > 32 {
+        if run_elevated_subcommand("tray") {
             unsafe { PostQuitMessage(0) };
         } else {
-            // Declined at the UAC prompt.
             self.single_instance = claim_single_instance();
         }
     }
 
     fn shutdown(mut self) {
-        // End a running session properly (input released, speakers back)
-        // before the runtime goes away.
+        if let Some(watcher) = self.scm_watcher.take() {
+            watcher.abort();
+        }
+        if let Some(sub) = self.service_sub.take() {
+            sub.abort();
+        }
+        // Only stop an in-process standalone agent; never stop the background
+        // Session 0 Windows service when the user closes the tray icon.
         if let Some((task, commands)) = self.agent.take() {
             let _ = commands.send(Command::EndSession);
             self.runtime.block_on(async {
@@ -397,32 +691,30 @@ impl App {
     }
 
     fn status_line(&self) -> String {
-        match &self.status {
+        let prefix = match self.mode {
+            Mode::ServiceClient => "系统服务 · ",
+            Mode::ServiceStopped => "",
+            Mode::Standalone => "",
+        };
+        let detail = match &self.status {
             Status::Connecting => "正在连接服务器…".into(),
             Status::Online => "在线，等待手机连接".into(),
             Status::Streaming { controller } => format!("{controller} 正在串流"),
-            Status::Offline { reason } => format!("离线：{}", short(reason, 60)),
-        }
+            Status::Offline { reason } => format!("离线：{}", short(reason, 55)),
+        };
+        format!("{prefix}{detail}")
     }
 
     fn tooltip(&self) -> String {
-        let name = self
-            .config
-            .as_ref()
-            .map(|c| c.name.as_str())
-            .unwrap_or("未配对");
-        format!("Waystone · {name}\n{}", self.status_line())
+        format!("Waystone · {}\n{}", self.display_name(), self.status_line())
     }
 
     /// The menu for the current state; the caller tracks and destroys it.
     fn build_menu(&self) -> Option<HMENU> {
         let streaming = matches!(self.status, Status::Streaming { .. });
-        let paired = self.config.is_some();
-        let (lock, mute) = self
-            .config
-            .as_ref()
-            .map(|config| (config.lock_on_disconnect, config.mute_speakers))
-            .unwrap_or((true, true));
+        let paired = self.is_paired();
+        let (lock, mute) = self.current_settings();
+        let can_control = self.mode != Mode::ServiceStopped;
         unsafe {
             let menu = CreatePopupMenu().ok()?;
             let header = HSTRING::from(self.status_line());
@@ -430,7 +722,12 @@ impl App {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(
                 menu,
-                MF_STRING | if streaming { MF_ENABLED } else { MF_GRAYED },
+                MF_STRING
+                    | if streaming && can_control {
+                        MF_ENABLED
+                    } else {
+                        MF_GRAYED
+                    },
                 item::END_SESSION,
                 w!("断开当前串流"),
             );
@@ -439,10 +736,19 @@ impl App {
             } else {
                 w!("从剪贴板配对")
             };
-            let _ = AppendMenuW(menu, MF_STRING, item::PAIR, pair);
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | if can_control { MF_ENABLED } else { MF_GRAYED },
+                item::PAIR,
+                pair,
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let toggle = |on: bool| MF_STRING | if on { MF_CHECKED } else { MF_UNCHECKED };
-            let settings = if paired { MF_ENABLED } else { MF_GRAYED };
+            let settings = if paired && can_control {
+                MF_ENABLED
+            } else {
+                MF_GRAYED
+            };
             let _ = AppendMenuW(
                 menu,
                 toggle(lock) | settings,
@@ -459,22 +765,59 @@ impl App {
                 menu,
                 toggle(autostart_enabled()),
                 item::AUTOSTART,
-                w!("登录 Windows 时自动启动"),
+                w!("登录 Windows 时显示托盘图标"),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-            if !input_permitted(false) {
-                let _ = AppendMenuW(
-                    menu,
-                    MF_STRING,
-                    item::ELEVATE,
-                    w!("以管理员身份重新启动（控制管理员窗口）"),
-                );
+            match self.mode {
+                Mode::ServiceClient => {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING | MF_GRAYED,
+                        0,
+                        w!("特权服务运行中（支持管理员窗口/UAC/锁屏）"),
+                    );
+                    let _ =
+                        AppendMenuW(menu, MF_STRING, item::UNINSTALL_SERVICE, w!("卸载系统服务"));
+                }
+                Mode::ServiceStopped => {
+                    let _ = AppendMenuW(menu, MF_STRING, item::START_SERVICE, w!("启动系统服务"));
+                    let _ =
+                        AppendMenuW(menu, MF_STRING, item::UNINSTALL_SERVICE, w!("卸载系统服务"));
+                }
+                Mode::Standalone => {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING,
+                        item::INSTALL_SERVICE,
+                        w!("安装为系统服务（支持管理员窗口/UAC/锁屏）"),
+                    );
+                    if !input_permitted(false) {
+                        let _ = AppendMenuW(
+                            menu,
+                            MF_STRING,
+                            item::ELEVATE,
+                            w!("以管理员身份重新启动（临时）"),
+                        );
+                    }
+                }
             }
             let _ = AppendMenuW(menu, MF_STRING, item::LOG, w!("打开日志"));
-            let _ = AppendMenuW(menu, MF_STRING, item::QUIT, w!("退出"));
+            let quit_label = if self.mode == Mode::ServiceClient {
+                w!("关闭托盘图标（后台服务保持运行）")
+            } else {
+                w!("退出")
+            };
+            let _ = AppendMenuW(menu, MF_STRING, item::QUIT, quit_label);
             Some(menu)
         }
     }
+}
+
+fn run_elevated_subcommand(args: &str) -> bool {
+    let exe = HSTRING::from(system::current_exe().as_os_str());
+    let params = HSTRING::from(args);
+    let result = unsafe { ShellExecuteW(None, w!("runas"), &exe, &params, None, SW_SHOWNORMAL) };
+    result.0 as isize > 32
 }
 
 /// Shows the menu at `x, y` and runs the chosen command. Must not be called
@@ -597,33 +940,32 @@ fn claim_single_instance() -> Option<HANDLE> {
     Some(mutex)
 }
 
-/// Logs to `host.log` in the state directory, keeping the previous run's
-/// log as `host.old.log`.
-fn init_logging(dir: &Path) {
-    let path = dir.join("host.log");
-    let _ = std::fs::rename(&path, dir.join("host.old.log"));
+/// Logs to `host.log` in standalone mode, or `tray.log` when the Session 0
+/// service owns `host.log`.
+fn init_logging(dir: &Path, standalone: bool) {
+    let (current, old) = if standalone {
+        ("host.log", "host.old.log")
+    } else {
+        ("tray.log", "tray.old.log")
+    };
+    let path = dir.join(current);
+    let _ = std::fs::rename(&path, dir.join(old));
     let Ok(file) = std::fs::File::create(&path) else {
         return;
     };
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "waystone_host=info,waystone_rtc=info".into()),
         )
         .with_ansi(false)
         .with_writer(Mutex::new(file))
-        .init();
+        .try_init();
 }
 
 fn message_box(text: &str) {
     let text = HSTRING::from(text);
     unsafe { MessageBoxW(None, &text, w!("Waystone"), MB_OK | MB_ICONINFORMATION) };
-}
-
-fn current_exe() -> PathBuf {
-    let mut buffer = vec![0u16; 1024];
-    let length = unsafe { GetModuleFileNameW(None, &mut buffer) } as usize;
-    PathBuf::from(String::from_utf16_lossy(&buffer[..length]))
 }
 
 fn clipboard_text() -> Option<String> {
@@ -672,7 +1014,7 @@ fn set_autostart(enabled: bool) -> Result<()> {
             .ok()
             .context("opening the Run key")?;
         let result = if enabled {
-            let command = format!("\"{}\" tray", current_exe().display());
+            let command = format!("\"{}\" tray", system::current_exe().display());
             let mut bytes: Vec<u8> = command
                 .encode_utf16()
                 .chain(Some(0))
@@ -798,6 +1140,6 @@ fn make_icon(size: u32, rgba: Vec<u8>) -> HICON {
             mask.as_ptr(),
             bgra.as_ptr(),
         )
-        .unwrap_or_default()
+        .expect("creating a tray icon")
     }
 }

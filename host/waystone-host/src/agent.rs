@@ -18,7 +18,7 @@ use waystone_proto::signal::{ByeReason, ClientMessage, ServerMessage, TurnCreden
 
 use crate::config::{Config, DeviceKey};
 use crate::platform;
-use crate::session::{Outcome, Request, Session};
+use crate::session::{Outcome, Request, Session, SessionMode};
 use crate::signal::Signal;
 
 /// What the agent is doing.
@@ -46,26 +46,40 @@ pub enum Command {
         lock_on_disconnect: bool,
         mute_speakers: bool,
     },
+    /// Gracefully ends any active session (running rollback) and exits `run`.
+    Shutdown,
 }
 
 pub type Reporter = Arc<dyn Fn(Status) + Send + Sync>;
 
-/// Reconnects forever with capped backoff; returns only on a fatal error
-/// (the server no longer knows this machine).
+/// Reconnects forever with capped backoff in direct in-process mode; returns
+/// only on a fatal error (the server no longer knows this machine) or shutdown.
 pub async fn run(
+    config: Config,
+    key: Arc<DeviceKey>,
+    report: Reporter,
+    commands: UnboundedReceiver<Command>,
+) -> Result<()> {
+    run_with_mode(config, key, SessionMode::Direct, report, commands).await
+}
+
+/// Reconnects forever with capped backoff using `mode` to access the desktop.
+pub async fn run_with_mode(
     mut config: Config,
     key: Arc<DeviceKey>,
+    mode: SessionMode,
     report: Reporter,
     mut commands: UnboundedReceiver<Command>,
 ) -> Result<()> {
-    if !platform::input_permitted(true) {
+    if matches!(mode, SessionMode::Direct) && !platform::input_permitted(true) {
         warn!("{}", platform::INPUT_PERMISSION_HINT);
     }
     let mut failures = 0u32;
     loop {
         report(Status::Connecting);
-        match serve(&mut config, &key, &report, &mut commands).await {
-            Ok(()) => failures = 0,
+        match serve(&mut config, &key, &mode, &report, &mut commands).await {
+            Ok(ServeExit::Shutdown) => return Ok(()),
+            Ok(ServeExit::Reconnect) => failures = 0,
             Err(error) if error.to_string().contains("not paired") => return Err(error),
             Err(error) => {
                 failures += 1;
@@ -82,10 +96,20 @@ pub async fn run(
         loop {
             tokio::select! {
                 _ = &mut wake => break,
-                Some(command) = commands.recv() => apply(&mut config, command),
+                Some(command) = commands.recv() => {
+                    if matches!(command, Command::Shutdown) {
+                        return Ok(());
+                    }
+                    apply(&mut config, command);
+                }
             }
         }
     }
+}
+
+enum ServeExit {
+    Reconnect,
+    Shutdown,
 }
 
 /// Settings apply to the next session; ending a session needs one.
@@ -130,19 +154,21 @@ pub async fn pair(dir: &Path, link: &str, name: String) -> Result<Config> {
 async fn serve(
     config: &mut Config,
     key: &DeviceKey,
+    mode: &SessionMode,
     report: &Reporter,
     commands: &mut UnboundedReceiver<Command>,
-) -> Result<()> {
+) -> Result<ServeExit> {
     let (mut signal, challenge) = Signal::connect(&config.endpoint, &config.fingerprint).await?;
     let turn = authenticate(&mut signal, key, &config.name, challenge).await?;
     info!("online as {}", config.name);
     report(Status::Online);
 
     let mut session: Option<Session> = None;
+    let mut shutting_down = false;
     let result = loop {
         tokio::select! {
             message = signal.next_message() => match message {
-                Ok(message) => if let Err(error) = handle(message, config, turn.as_ref(), &mut signal, &mut session, report).await {
+                Ok(message) => if let Err(error) = handle(message, config, mode, turn.as_ref(), &mut signal, &mut session, report).await {
                     break Err(error);
                 },
                 Err(error) => break Err(error),
@@ -154,6 +180,15 @@ async fn serve(
                     finish(Some(current), false);
                     report(Status::Online);
                 },
+                Command::Shutdown => {
+                    shutting_down = true;
+                    if let Some(current) = session.take() {
+                        info!("ending session {} for service shutdown", current.id);
+                        let _ = signal.send(&ClientMessage::SessionBye { session_id: current.id.clone(), reason: ByeReason::HostError }).await;
+                        finish(Some(current), config.locks_after(ByeReason::NetworkTimeout));
+                    }
+                    break Ok(ServeExit::Shutdown);
+                }
                 other => apply(config, other),
             },
             outcome = async { session.as_mut().unwrap().next().await }, if session.is_some() => {
@@ -173,18 +208,27 @@ async fn serve(
             }
         }
     };
-    // Without signaling the controller is gone too: the server ends the
-    // session on its side, so roll back as for a network timeout.
-    finish(
-        session.take(),
-        config.locks_after(ByeReason::NetworkTimeout),
-    );
-    result
+    if !shutting_down {
+        // Without signaling the controller is gone too: the server ends the
+        // session on its side, so roll back as for a network timeout.
+        finish(
+            session.take(),
+            config.locks_after(ByeReason::NetworkTimeout),
+        );
+    }
+    result.map(|_| {
+        if shutting_down {
+            ServeExit::Shutdown
+        } else {
+            ServeExit::Reconnect
+        }
+    })
 }
 
 async fn handle(
     message: ServerMessage,
     config: &Config,
+    mode: &SessionMode,
     turn: Option<&TurnCredentials>,
     signal: &mut Signal,
     session: &mut Option<Session>,
@@ -213,7 +257,14 @@ async fn handle(
                 audio,
                 codec: video_codec,
             };
-            match Session::start(request, &config.session_options(), Some(&config.turn), turn).await
+            match Session::start(
+                request,
+                &config.session_options(),
+                mode,
+                Some(&config.turn),
+                turn,
+            )
+            .await
             {
                 Ok(started) => {
                     *session = Some(started);

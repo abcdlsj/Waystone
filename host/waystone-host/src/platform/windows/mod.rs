@@ -1,21 +1,22 @@
-//! Windows: DXGI desktop duplication, Media Foundation hardware encoding,
-//! WASAPI loopback with Opus, and `SendInput`.
-//!
-//! This is the in-session host (design doc 4.3, 4.4, 4.5): it runs in the
-//! logged-in user's desktop. The Session 0 service that survives the lock
-//! screen, UAC prompts and reboots (4.1) and the virtual display (4.2) are
-//! separate work.
+//! Windows: Session 0 privileged service + console-session worker (design doc
+//! 4.1), DXGI desktop duplication, Media Foundation hardware encoding (4.3),
+//! WASAPI loopback with Opus (4.4), `SendInput`, and deterministic rollback (4.5).
 
 mod audio;
 mod capture;
 mod com;
+mod desktop;
 mod inject;
 mod keymap;
+mod security;
+pub mod service;
+mod session_spawn;
 mod system;
 pub mod tray;
 mod video;
+pub mod worker;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use capture::Capture;
 pub use inject::post;
@@ -23,9 +24,9 @@ pub use system::{input_permitted, lock_screen, main_display, SpeakerMute};
 
 pub const PLATFORM: waystone_proto::device::Platform = waystone_proto::device::Platform::Windows;
 
-pub const INPUT_PERMISSION_HINT: &str = "not running as administrator: windows of programs \
-     started as administrator (some games and launchers) will ignore touches. Run the host \
-     from an elevated prompt to control them too.";
+pub const INPUT_PERMISSION_HINT: &str = "not running as administrator or Windows service: \
+     windows of elevated programs (some games, launchers and UAC) will ignore touches. \
+     Install the privileged service with `waystone-host service install` from an elevated prompt.";
 
 /// Per-monitor DPI awareness, so display rectangles, the cursor position and
 /// injected coordinates are all physical pixels; and the terminal, if one
@@ -35,12 +36,20 @@ pub fn init() {
     system::attach_parent_console();
 }
 
-/// `%LOCALAPPDATA%\Waystone`, from the shell rather than the environment:
-/// a process started through WSL interop has no `LOCALAPPDATA`.
+/// `%ProgramData%\Waystone` so the Session 0 `LocalSystem` service and the
+/// interactive user's tray/CLI share one machine-wide identity and configuration.
+/// Falls back to `%LOCALAPPDATA%\Waystone` if `ProgramData` is unavailable.
 pub fn state_dir() -> PathBuf {
-    system::local_app_data()
+    system::program_data()
+        .or_else(system::local_app_data)
         .map(|base| base.join("Waystone"))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Migrates any legacy `%LOCALAPPDATA%\Waystone` state into `target` if `target`
+/// is not yet paired.
+pub fn migrate_legacy_state(target: &Path) {
+    system::migrate_legacy_state(target);
 }
 
 pub fn hostname() -> Option<String> {

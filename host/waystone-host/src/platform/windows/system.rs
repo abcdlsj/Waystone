@@ -1,6 +1,8 @@
 //! Which display is streamed, and what a session changes and puts back
 //! (design doc 4.4 and 4.5).
 
+use std::path::{Path, PathBuf};
+
 use tracing::{info, warn};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Graphics::Dxgi::{
@@ -8,15 +10,22 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
-use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::Security::{
+    GetTokenInformation, ImpersonateLoggedOnUser, RevertToSelf, TokenElevation, TOKEN_ELEVATION,
+    TOKEN_QUERY,
+};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTSGetActiveConsoleSessionId, WTSQueryUserToken,
+};
 use windows::Win32::System::Shutdown::LockWorkStation;
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
-use super::com;
+use super::{com, desktop};
 use crate::display::Display;
 
 pub fn attach_parent_console() {
@@ -25,14 +34,53 @@ pub fn attach_parent_console() {
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
-pub fn local_app_data() -> Option<std::path::PathBuf> {
+pub fn current_exe() -> PathBuf {
+    let mut buffer = vec![0u16; 1024];
+    let length = unsafe { GetModuleFileNameW(None, &mut buffer) } as usize;
+    PathBuf::from(String::from_utf16_lossy(&buffer[..length]))
+}
+
+pub fn current_process_session_id() -> u32 {
+    let mut session_id = 0u32;
+    let _ = unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id) };
+    session_id
+}
+
+pub fn program_data() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as *const _));
+        text.map(PathBuf::from)
+    }
+}
+
+pub fn local_app_data() -> Option<PathBuf> {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
     unsafe {
         let path = SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None).ok()?;
         let text = path.to_string().ok();
         CoTaskMemFree(Some(path.0 as *const _));
-        text.map(std::path::PathBuf::from)
+        text.map(PathBuf::from)
+    }
+}
+
+/// Migrates legacy per-user state (`%LOCALAPPDATA%\Waystone`) into the unified
+/// machine-wide directory (`%ProgramData%\Waystone`) when the target does not
+/// yet have `config.json` or `device.key`.
+pub fn migrate_legacy_state(target: &Path) {
+    let Some(legacy) = local_app_data().map(|base| base.join("Waystone")) else {
+        return;
+    };
+    if crate::config::migrate_state_dir(&legacy, target) {
+        info!(
+            "migrated Waystone state from {} to {}",
+            legacy.display(),
+            target.display()
+        );
     }
 }
 
@@ -121,7 +169,26 @@ pub fn input_permitted(_prompt: bool) -> bool {
 
 pub fn lock_screen() {
     info!("locking the screen");
-    if let Err(error) = unsafe { LockWorkStation() } {
+    let _ = desktop::sync_thread_to_input_desktop();
+    // When running as LocalSystem inside the active console session,
+    // impersonating the logged-in console user ensures LockWorkStation routes
+    // to the interactive user session cleanly.
+    let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+    let mut impersonated = false;
+    if session_id != u32::MAX {
+        let mut user_token = HANDLE::default();
+        if unsafe { WTSQueryUserToken(session_id, &mut user_token) }.is_ok() {
+            if unsafe { ImpersonateLoggedOnUser(user_token) }.is_ok() {
+                impersonated = true;
+            }
+            let _ = unsafe { CloseHandle(user_token) };
+        }
+    }
+    let result = unsafe { LockWorkStation() };
+    if impersonated {
+        let _ = unsafe { RevertToSelf() };
+    }
+    if let Err(error) = result {
         warn!("could not lock the screen: {error}");
     }
 }

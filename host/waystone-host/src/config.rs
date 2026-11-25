@@ -159,6 +159,36 @@ pub fn state_dir() -> PathBuf {
     }
 }
 
+/// Copies `device.key` and `config.json` from `legacy` into `target` when
+/// `target` does not yet hold either file. Returns `true` if any file was
+/// copied. Never overwrites existing files in `target`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn migrate_state_dir(legacy: &Path, target: &Path) -> bool {
+    if legacy == target || !legacy.exists() {
+        return false;
+    }
+    let target_cfg = target.join("config.json");
+    let target_key = target.join("device.key");
+    if target_cfg.exists() || target_key.exists() {
+        return false;
+    }
+    let legacy_cfg = legacy.join("config.json");
+    let legacy_key = legacy.join("device.key");
+    if !legacy_cfg.exists() && !legacy_key.exists() {
+        return false;
+    }
+    if std::fs::create_dir_all(target).is_err() {
+        return false;
+    }
+    let mut copied = false;
+    for (src, dst) in [(&legacy_key, &target_key), (&legacy_cfg, &target_cfg)] {
+        if src.exists() && !dst.exists() && std::fs::copy(src, dst).is_ok() {
+            copied = true;
+        }
+    }
+    copied
+}
+
 /// Writes a file only the owner can read, without a window where it is
 /// briefly readable by others: a temporary file is created 0600, filled,
 /// and renamed over the target.
@@ -259,5 +289,38 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn migrates_legacy_state_without_overwriting_existing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        let target = root.path().join("programdata");
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        let key = DeviceKey::load_or_create(&legacy.join("device.key")).unwrap();
+        let cfg = Config::new(
+            "host:8443".into(),
+            "host:3478".into(),
+            "b".repeat(64),
+            "GamePC".into(),
+        );
+        cfg.save(&legacy.join("config.json")).unwrap();
+
+        assert!(migrate_state_dir(&legacy, &target));
+        let migrated_key = DeviceKey::load_or_create(&target.join("device.key")).unwrap();
+        assert_eq!(migrated_key.info_key, key.info_key);
+        let migrated_cfg = Config::load(&target.join("config.json")).unwrap();
+        assert_eq!(migrated_cfg.name, "GamePC");
+
+        // Second call must be a no-op and preserve any newer edits in target.
+        let mut updated = migrated_cfg;
+        updated.name = "UpdatedPC".into();
+        updated.save(&target.join("config.json")).unwrap();
+        assert!(!migrate_state_dir(&legacy, &target));
+        assert_eq!(
+            Config::load(&target.join("config.json")).unwrap().name,
+            "UpdatedPC"
+        );
     }
 }
