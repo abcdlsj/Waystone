@@ -19,3 +19,13 @@
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::*;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use self::windows::*;
+
+// The key tables are pure, so their tests run on any development machine.
+#[cfg(all(test, not(windows)))]
+#[path = "windows/keymap.rs"]
+mod windows_keymap;

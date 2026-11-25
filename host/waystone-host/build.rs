@@ -11,12 +11,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src/platform/macos/swift");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Only macOS can build the host agent; other targets get an empty archive so
-    // `cargo check --workspace` keeps working everywhere.
+    // The Swift layer is the macOS platform; other targets have their own in
+    // Rust (src/platform).
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     if target_os != "macos" {
-        println!("cargo:warning=capture layer is only built for macOS hosts");
         return;
     }
 
