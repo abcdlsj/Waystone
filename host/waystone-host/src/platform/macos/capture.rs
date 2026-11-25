@@ -2,6 +2,7 @@
 
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use tokio::sync::oneshot;
@@ -42,6 +43,9 @@ extern "C" fn on_started(status: i32, context: *mut c_void) {
     let sender = unsafe { Box::from_raw(context as *mut oneshot::Sender<i32>) };
     let _ = sender.send(status);
 }
+
+/// Longest wait for ScreenCaptureKit to deliver its first frame.
+const START_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A running capture session; stopping it is dropping it.
 pub struct Capture {
@@ -88,7 +92,17 @@ impl Capture {
         let (sender, receiver) = oneshot::channel::<i32>();
         let done = Box::into_raw(Box::new(sender)) as *mut c_void;
         unsafe { ffi::ws_capture_start(handle, on_started, done) };
-        match receiver.await.unwrap_or(-4) {
+        // ScreenCaptureKit waits silently while macOS shows a permission
+        // prompt, which it does again after every rebuild of an unsigned
+        // binary. Without a limit the session would hang in "connecting".
+        let status = match tokio::time::timeout(START_TIMEOUT, receiver).await {
+            Ok(status) => status.unwrap_or(-4),
+            Err(_) => bail!(
+                "screen capture did not start within {START_TIMEOUT:?}; macOS may be showing a \
+                 Screen Recording prompt for this binary"
+            ),
+        };
+        match status {
             0 => Ok(capture),
             ffi::CAPTURE_NO_DISPLAY => bail!("no display to capture"),
             ffi::CAPTURE_DISPLAY_ASLEEP => bail!("the display is asleep"),
