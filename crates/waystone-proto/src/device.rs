@@ -220,15 +220,17 @@ impl Viewport {
         }
     }
 
-    /// Clamps the requested frame rate into the two supported tiers.
+    /// Clamps the requested frame rate into the supported tiers (`30`, `45`, `60`).
     ///
-    /// Anything at or above 50 is treated as the smooth tier so that a device
-    /// reporting a 120 Hz display still gets a predictable 60 fps stream.
+    /// Anything at or above 50 is treated as 60 fps so that a device reporting
+    /// a 120 Hz display still gets a predictable 60 fps stream.
     pub fn frame_rate_tier(&self) -> u32 {
         if self.fps >= 50 {
             60
-        } else {
+        } else if self.fps >= 38 {
             45
+        } else {
+            30
         }
     }
 }

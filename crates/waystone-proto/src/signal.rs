@@ -51,8 +51,10 @@ pub enum RtcSignal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionControl {
-    /// Switch frame rate cap, `45` for low power or `60` for smooth.
+    /// Switch frame rate cap (`30`, `45`, or `60`).
     SetFrameRate { fps: u32 },
+    /// Switch target bounding resolution while keeping the display aspect ratio.
+    SetResolution { width: u32, height: u32 },
     /// Ask the host to emit an IDR frame right now.
     RequestKeyframe,
     /// Pause or resume the video track without tearing the session down.
@@ -299,8 +301,9 @@ mod tests {
             dpi: 0,
             fps: 0,
         };
+        assert_eq!(Viewport { fps: 24, ..base }.frame_rate_tier(), 30);
+        assert_eq!(Viewport { fps: 30, ..base }.frame_rate_tier(), 30);
         assert_eq!(Viewport { fps: 45, ..base }.frame_rate_tier(), 45);
-        assert_eq!(Viewport { fps: 30, ..base }.frame_rate_tier(), 45);
         assert_eq!(Viewport { fps: 60, ..base }.frame_rate_tier(), 60);
         assert_eq!(Viewport { fps: 120, ..base }.frame_rate_tier(), 60);
     }

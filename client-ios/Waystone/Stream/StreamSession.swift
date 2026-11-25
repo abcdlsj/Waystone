@@ -41,6 +41,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
     @Published private(set) var stage: Stage = .connecting
     @Published private(set) var path = Path()
     @Published private(set) var progress = "正在连接…"
+    @Published private(set) var liveFps = 0
 
     /// Seconds of silence before the recovery banner, and before giving up.
     static let bannerAfter: TimeInterval = 3
@@ -59,6 +60,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
     private var startedAt = Date()
     private var healthTimer: Timer?
     private var lastKeyframeRequest = Date.distantPast
+    private var lastFpsSample: (decoded: Int, at: Date) = (0, Date())
     #if DEBUG
     private var lastStats: (received: Int, decoded: Int, skipped: Int, failed: Int) = (0, 0, 0, 0)
     private var statsTicks = 0
@@ -91,7 +93,8 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
 
     func start() {
         startedAt = Date()
-        let viewport = Self.viewport(fps: preferences.frameRate.rawValue)
+        lastFpsSample = (0, startedAt)
+        let viewport = Self.viewport(resolution: preferences.resolution, fps: preferences.frameRate.rawValue)
         do {
             transport = try Transport(
                 Transport.Configuration(
@@ -131,6 +134,12 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
     func setFrameRate(_ rate: StreamPreferences.FrameRate) {
         preferences.frameRate = rate
         sendControl(.setFrameRate(fps: rate.rawValue))
+    }
+
+    func setResolution(_ resolution: StreamPreferences.Resolution) {
+        preferences.resolution = resolution
+        let target = Self.targetSize(for: resolution)
+        sendControl(.setResolution(width: target.width, height: target.height))
     }
 
     func setSound(_ sound: StreamPreferences.Sound) {
@@ -250,6 +259,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
     // MARK: - Health
 
     private func checkHealth() {
+        updateFps()
         logStats()
         let age = pipeline.pictureAge
         switch stage {
@@ -309,6 +319,16 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
         stage = .ended(ending)
     }
 
+    private func updateFps() {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastFpsSample.at)
+        guard elapsed >= 0.95 else { return }
+        let decoded = pipeline.stats.decoder.decoded
+        let delta = max(0, decoded - lastFpsSample.decoded)
+        liveFps = Int((Double(delta) / elapsed).rounded())
+        lastFpsSample = (decoded, now)
+    }
+
     /// Development builds log throughput every 2 s, which tells "the network
     /// is slow" from "the decoder is behind" without a debugger.
     private func logStats() {
@@ -323,12 +343,21 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
         #endif
     }
 
-    /// The screen in landscape device pixels; streams are always landscape.
-    static func viewport(fps: UInt32) -> Wire.Viewport {
-        let screen = UIScreen.main
-        let size = screen.nativeBounds.size
+    /// Target landscape bounding box in pixels for the selected resolution tier.
+    static func targetSize(for resolution: StreamPreferences.Resolution) -> (width: UInt32, height: UInt32) {
+        if let fixed = resolution.maxSize {
+            return fixed
+        }
+        let size = UIScreen.main.nativeBounds.size
+        return (UInt32(max(size.width, size.height)), UInt32(min(size.width, size.height)))
+    }
+
+    /// The screen (or user-selected resolution cap) in landscape device pixels;
+    /// streams are always landscape.
+    static func viewport(resolution: StreamPreferences.Resolution = .auto, fps: UInt32) -> Wire.Viewport {
+        let target = targetSize(for: resolution)
         return Wire.Viewport(
-            width: UInt32(max(size.width, size.height)), height: UInt32(min(size.width, size.height)),
+            width: target.width, height: target.height,
             dpi: UInt16(UIDevice.current.userInterfaceIdiom == .pad ? 264 : 460), fps: fps)
     }
 }

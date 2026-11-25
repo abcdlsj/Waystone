@@ -60,12 +60,12 @@ final class VideoDecoder {
     private var session: VTDecompressionSession?
     private var format: CMFormatDescription?
     private var parameterSets: [Data] = []
-    private var waitingForKeyframe = true
 
     private let lock = NSLock()
     private var inFlight = 0
     private var stats = Stats()
-    static let maxInFlight = 2
+    private var needsKeyframe = true
+    static let maxInFlight = 4
 
     init(codec: Wire.VideoCodec) {
         syntax = NalSyntax(codec)
@@ -125,15 +125,22 @@ final class VideoDecoder {
             }
         }
         guard let session, let format, !slices.isEmpty else { return }
-        if waitingForKeyframe {
-            guard keyframe else { return }
-            waitingForKeyframe = false
-        }
 
         lock.lock()
+        if needsKeyframe {
+            guard keyframe else {
+                lock.unlock()
+                return
+            }
+            needsKeyframe = false
+        }
         if !keyframe && inFlight >= Self.maxInFlight {
             stats.skipped += 1
+            // Skipping a P-frame breaks the reference chain for an infinite-GOP
+            // stream, so drop subsequent P-frames until a fresh keyframe lands.
+            needsKeyframe = true
             lock.unlock()
+            onKeyframeNeeded?()
             return
         }
         inFlight += 1
@@ -149,8 +156,7 @@ final class VideoDecoder {
         if status != noErr {
             Log.media.error("decode failed: \(status, privacy: .public)")
             finished(decoded: false)
-            waitingForKeyframe = true
-            onKeyframeNeeded?()
+            markKeyframeNeeded()
         }
     }
 
@@ -188,7 +194,9 @@ final class VideoDecoder {
         session = created
         format = newFormat
         parameterSets = sets
-        waitingForKeyframe = true
+        lock.lock()
+        needsKeyframe = true
+        lock.unlock()
         return true
     }
 
@@ -227,7 +235,22 @@ final class VideoDecoder {
     private func output(status: OSStatus, image: CVImageBuffer?) {
         let ok = status == noErr && image != nil
         finished(decoded: ok)
-        if ok, let image { onFrame?(image) }
+        if ok, let image {
+            onFrame?(image)
+        } else {
+            Log.media.error("async decode failed: \(status, privacy: .public)")
+            markKeyframeNeeded()
+        }
+    }
+
+    private func markKeyframeNeeded() {
+        lock.lock()
+        let shouldRequest = !needsKeyframe
+        needsKeyframe = true
+        lock.unlock()
+        if shouldRequest {
+            onKeyframeNeeded?()
+        }
     }
 
     private func finished(decoded: Bool) {

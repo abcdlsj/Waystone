@@ -22,12 +22,15 @@ final class InputController: ObservableObject {
     @Published private(set) var mode: Mode
     /// Remote cursor, `0...1`; drawn locally in trackpad mode.
     @Published private(set) var cursor: (x: Double, y: Double) = (0.5, 0.5)
+    /// True while a finger is actively hovering or dragging in direct mode.
+    @Published private(set) var directPointerActive = false
     /// Keys latched by toggle capsules, so they can be drawn as active.
     @Published private(set) var latchedKeys: Set<KeyCode> = []
     /// One-shot modifiers armed from the soft keyboard bar.
     @Published private(set) var armedModifiers: Modifiers = []
 
     private var engine: TouchEngine
+    private var activeTouches: Set<Int> = []
     private var heldKeys: Set<KeyCode> = []
     /// Where input frames go; the session points it at the transport.
     var sink: (InputEvent) -> Void = { _ in }
@@ -65,6 +68,7 @@ final class InputController: ObservableObject {
     var deadline: TimeInterval? { engine.deadline }
 
     func touchBegan(_ id: Int, at point: CGPoint, time: TimeInterval) {
+        activeTouches.insert(id)
         apply(engine.began(id, at: point, time: time))
     }
 
@@ -73,10 +77,16 @@ final class InputController: ObservableObject {
     }
 
     func touchEnded(_ id: Int, at point: CGPoint, time: TimeInterval) {
+        activeTouches.remove(id)
         apply(engine.ended(id, at: point, time: time))
+        if activeTouches.isEmpty {
+            directPointerActive = false
+        }
     }
 
     func touchesCancelled() {
+        activeTouches.removeAll()
+        directPointerActive = false
         apply(engine.cancelled())
     }
 
@@ -86,6 +96,8 @@ final class InputController: ObservableObject {
 
     func setMode(_ mode: Mode) {
         guard mode != self.mode else { return }
+        activeTouches.removeAll()
+        directPointerActive = false
         apply(engine.cancelled())
         self.mode = mode
         engine = Self.makeEngine(mode)
@@ -178,6 +190,9 @@ final class InputController: ObservableObject {
             switch output {
             case .move(let point):
                 cursor = geometry.normalized(point)
+                if mode == .direct && !activeTouches.isEmpty {
+                    directPointerActive = true
+                }
                 sink(.mouseMove(x: cursor.x, y: cursor.y))
             case .moveBy(let delta):
                 let size = geometry.displayedSize

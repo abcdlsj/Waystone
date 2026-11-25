@@ -168,17 +168,22 @@ enum Wire {
 
     enum SessionControl: Codable, Equatable {
         case setFrameRate(fps: UInt32)
+        case setResolution(width: UInt32, height: UInt32)
         case requestKeyframe
         case setVideoEnabled(Bool)
         case setAudioEnabled(Bool)
         case selectDisplay(index: UInt32)
 
-        private enum Keys: String, CodingKey { case kind, fps, enabled, index }
+        private enum Keys: String, CodingKey { case kind, fps, width, height, enabled, index }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
             switch try c.decode(String.self, forKey: .kind) {
             case "set_frame_rate": self = .setFrameRate(fps: try c.decode(UInt32.self, forKey: .fps))
+            case "set_resolution":
+                self = .setResolution(
+                    width: try c.decode(UInt32.self, forKey: .width),
+                    height: try c.decode(UInt32.self, forKey: .height))
             case "request_keyframe": self = .requestKeyframe
             case "set_video_enabled": self = .setVideoEnabled(try c.decode(Bool.self, forKey: .enabled))
             case "set_audio_enabled": self = .setAudioEnabled(try c.decode(Bool.self, forKey: .enabled))
@@ -195,6 +200,10 @@ enum Wire {
             case .setFrameRate(let fps):
                 try c.encode("set_frame_rate", forKey: .kind)
                 try c.encode(fps, forKey: .fps)
+            case .setResolution(let width, let height):
+                try c.encode("set_resolution", forKey: .kind)
+                try c.encode(width, forKey: .width)
+                try c.encode(height, forKey: .height)
             case .requestKeyframe:
                 try c.encode("request_keyframe", forKey: .kind)
             case .setVideoEnabled(let enabled):

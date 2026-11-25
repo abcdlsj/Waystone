@@ -19,7 +19,7 @@ struct ControlPanel: View {
                 .fill(WaystoneTheme.borderSubtle)
                 .frame(height: 0.75)
 
-            VStack(spacing: 9) {
+            VStack(spacing: 7) {
                 controlRow("触控") {
                     WaystoneSegmentedControl(
                         options: InputController.Mode.allCases,
@@ -38,7 +38,15 @@ struct ControlPanel: View {
                     )
                 }
 
-                controlRow("画质") {
+                controlRow("分辨率") {
+                    WaystoneSegmentedControl(
+                        options: StreamPreferences.Resolution.allCases,
+                        selection: binding(\.resolution, session.setResolution),
+                        title: \.title
+                    )
+                }
+
+                controlRow("帧率") {
                     WaystoneSegmentedControl(
                         options: StreamPreferences.FrameRate.allCases,
                         selection: binding(\.frameRate, session.setFrameRate),
@@ -55,7 +63,7 @@ struct ControlPanel: View {
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, 10)
 
             Rectangle()
                 .fill(WaystoneTheme.borderSubtle)
@@ -63,21 +71,29 @@ struct ControlPanel: View {
 
             actionFooter
                 .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.vertical, 9)
                 .background(WaystoneTheme.footerSurface)
         }
-        .frame(width: 440)
+        .frame(width: 456)
         .consolePanel(cornerRadius: 8, opacity: 0.96)
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Text(session.host.name)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(WaystoneTheme.textPrimary)
                 .lineLimit(1)
 
             PathCapsule(stage: session.stage, path: session.path)
+
+            if let streamStats = streamStatsLabel {
+                Text(streamStats)
+                    .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(WaystoneTheme.textTertiary)
+                    .lineLimit(1)
+            }
 
             Spacer(minLength: 6)
 
@@ -184,12 +200,22 @@ struct ControlPanel: View {
         }
     }
 
+    private var streamStatsLabel: String? {
+        let size = input.geometry.videoSize
+        guard size.width > 0, size.height > 0 else { return nil }
+        let res = "\(Int(size.width))×\(Int(size.height))"
+        if session.liveFps > 0 {
+            return "\(res) · \(session.liveFps) fps"
+        }
+        return "\(res) · \(preferences.frameRate.rawValue) Hz"
+    }
+
     private func controlRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 10) {
             Text(title)
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(WaystoneTheme.textSecondary)
-                .frame(width: 36, alignment: .leading)
+                .frame(width: 40, alignment: .leading)
             content()
         }
     }
@@ -201,7 +227,7 @@ struct ControlPanel: View {
     }
 }
 
-/// "直连 · 12 ms" in emerald, "中继 · 40 ms" in amber (design doc 3.3).
+/// "P2P 直连 · 12 ms" in emerald, "TURN 中继 · 40 ms" in amber (design doc 3.3).
 struct PathCapsule: View {
     var stage: StreamSession.Stage
     var path: StreamSession.Path
@@ -235,7 +261,7 @@ struct PathCapsule: View {
 
     private var label: String {
         if isStalled { return "网络波动" }
-        let kind = path.relayed ? "中继" : "直连"
+        let kind = path.relayed ? "TURN 中继" : "P2P 直连"
         guard let rtt = path.rttMs else { return kind }
         return "\(kind) · \(rtt) ms"
     }

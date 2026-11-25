@@ -35,6 +35,9 @@ private struct StreamContent: View {
             if input.mode == .trackpad {
                 LocalCursor(position: input.geometry.surfacePoint(x: input.cursor.x, y: input.cursor.y))
                     .ignoresSafeArea()
+            } else if input.directPointerActive {
+                DirectTouchReticle(position: input.geometry.surfacePoint(x: input.cursor.x, y: input.cursor.y))
+                    .ignoresSafeArea()
             }
 
             if session.stage != .connecting {
@@ -110,6 +113,24 @@ private struct LocalCursor: View {
             Circle()
                 .fill(.white)
                 .frame(width: 2.5, height: 2.5)
+        }
+        .position(position)
+        .allowsHitTesting(false)
+    }
+}
+
+/// Subtle zero-latency touch feedback while hovering or dragging in direct mode.
+private struct DirectTouchReticle: View {
+    var position: CGPoint
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(.black.opacity(0.45), lineWidth: 2)
+                .frame(width: 18, height: 18)
+            Circle()
+                .strokeBorder(.white.opacity(0.75), lineWidth: 1)
+                .frame(width: 18, height: 18)
         }
         .position(position)
         .allowsHitTesting(false)

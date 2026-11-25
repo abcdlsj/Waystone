@@ -41,6 +41,14 @@ final class MediaPipeline: MediaSink {
         return Date().timeIntervalSince(lastMedia)
     }
 
+    /// Time since the last decoded video frame was produced, in seconds.
+    var pictureAge: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let lastPicture else { return .infinity }
+        return Date().timeIntervalSince(lastPicture)
+    }
+
     var hasPicture: Bool {
         lock.lock()
         defer { lock.unlock() }
