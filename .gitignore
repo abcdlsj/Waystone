@@ -16,3 +16,5 @@ client-ios/Vendor/
 *.log
 .DS_Store
 .claude/
+docs/NETWORK_LOCAL.md
+docs/*.local.md
