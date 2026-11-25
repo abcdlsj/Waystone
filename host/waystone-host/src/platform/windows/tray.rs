@@ -117,6 +117,9 @@ pub fn run(dir: &Path) -> Result<()> {
         return Ok(());
     };
     init_logging(dir);
+    // No console to print to, and a panic in the window procedure aborts:
+    // the log is the only place that can say what went wrong.
+    std::panic::set_hook(Box::new(|panic| tracing::error!("{panic}")));
     info!("tray starting, state in {}", dir.display());
 
     let window = create_window()?;
@@ -170,8 +173,11 @@ pub fn run(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Runs `f` on the app. `None` while the app is already borrowed: menus,
+/// UAC and shell calls run nested message loops that re-enter the window
+/// procedure, and a panic there would abort the process.
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
-    APP.with(|cell| cell.borrow_mut().as_mut().map(f))
+    APP.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
 }
 
 impl App {
@@ -408,7 +414,8 @@ impl App {
         format!("Waystone · {name}\n{}", self.status_line())
     }
 
-    fn show_menu(&mut self, x: i32, y: i32) {
+    /// The menu for the current state; the caller tracks and destroys it.
+    fn build_menu(&self) -> Option<HMENU> {
         let streaming = matches!(self.status, Status::Streaming { .. });
         let paired = self.config.is_some();
         let (lock, mute) = self
@@ -417,9 +424,7 @@ impl App {
             .map(|config| (config.lock_on_disconnect, config.mute_speakers))
             .unwrap_or((true, true));
         unsafe {
-            let Ok(menu) = CreatePopupMenu() else {
-                return;
-            };
+            let menu = CreatePopupMenu().ok()?;
             let header = HSTRING::from(self.status_line());
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &header);
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
@@ -467,25 +472,39 @@ impl App {
             }
             let _ = AppendMenuW(menu, MF_STRING, item::LOG, w!("打开日志"));
             let _ = AppendMenuW(menu, MF_STRING, item::QUIT, w!("退出"));
-
-            // Without this the menu does not close when clicking elsewhere.
-            let _ = SetForegroundWindow(self.window);
-            let chosen = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
-                x,
-                y,
-                None,
-                self.window,
-                None,
-            );
-            let _ = PostMessageW(Some(self.window), WM_NULL, WPARAM(0), LPARAM(0));
-            let _ = DestroyMenu(menu);
-            if chosen.0 != 0 {
-                self.command(chosen.0 as usize);
-            }
+            Some(menu)
         }
     }
+}
+
+/// Shows the menu at `x, y` and runs the chosen command. Must not be called
+/// with the app borrowed: the menu's own message loop re-enters the window
+/// procedure, which needs the app for status updates.
+fn show_menu(window: HWND, x: i32, y: i32) {
+    let Some(menu) = with_app(|app| app.build_menu()).flatten() else {
+        return;
+    };
+    let chosen = unsafe {
+        // Without this the menu does not close when clicking elsewhere.
+        let _ = SetForegroundWindow(window);
+        let chosen = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+            x,
+            y,
+            None,
+            window,
+            None,
+        );
+        let _ = PostMessageW(Some(window), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        chosen.0 as usize
+    };
+    if chosen != 0 {
+        with_app(|app| app.command(chosen));
+    }
+    // Status changes that arrived while the menu was open.
+    let _ = unsafe { PostMessageW(Some(window), WM_UPDATE, WPARAM(0), LPARAM(0)) };
 }
 
 extern "system" fn window_proc(
@@ -507,7 +526,7 @@ extern "system" fn window_proc(
                 if event != WM_CONTEXTMENU {
                     let _ = unsafe { GetCursorPos(&mut point) };
                 }
-                with_app(|app| app.show_menu(point.x, point.y));
+                show_menu(window, point.x, point.y);
             }
             LRESULT(0)
         }
