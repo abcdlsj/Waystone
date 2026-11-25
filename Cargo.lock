@@ -3249,6 +3249,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "waystone-setup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "waystone-proto",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "waystoned"
 version = "0.1.0"
 dependencies = [
