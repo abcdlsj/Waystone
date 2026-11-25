@@ -24,8 +24,9 @@ developer documentation — is English.
     hardware encoding (NVENC/AMF/QSV) + WASAPI loopback Opus + `SendInput`
     injection + tray UI + Session 0 service & console worker for UAC/lock-screen
     and elevated windows.
-- **Native iOS controller (`client-ios`)**: Pure-black monochrome console UI in
-  SwiftUI, hardware VideoToolbox + Metal rendering, direct-touch & trackpad
+- **Native mobile controllers (`client-ios`, `client-android`)**: Pure-black
+  monochrome console UI in SwiftUI (iOS) and Jetpack Compose (Android),
+  hardware VideoToolbox/Metal & MediaCodec decoding, direct-touch & trackpad
   modes, game hotkey presets & virtual stick, live `P2P 直连` / `TURN 中继` +
   RTT/FPS telemetry, and live mid-stream resolution (`原生` / `720p` / `1080p` /
   `2K`) and frame-rate (`30` / `45` / `60 Hz`) switching.
@@ -38,6 +39,7 @@ crates/waystone-rtc     str0m engine, STUN/TURN, port mapping, NAT3-NAT4 punch, 
 crates/waystoned        All-in-one daemon: admin panel, WSS signaling, embedded TURN
 host/waystone-host      Host agent for macOS and Windows (tray + Session 0 service)
 client-ios              Native iOS controller (SwiftUI + VideoToolbox + Metal)
+client-android          Native Android controller (Jetpack Compose + MediaCodec + JNI)
 ```
 
 ## Status
@@ -49,6 +51,7 @@ client-ios              Native iOS controller (SwiftUI + VideoToolbox + Metal)
 | `waystoned` | Done — HTTPS admin panel, WSS signaling, SQLite store, embedded TURN server |
 | `host/waystone-host` | Done — macOS & Windows (DXGI, GPU HDR→SDR, Media Foundation HEVC/H.264, tray, Session 0 service) |
 | `client-ios` | Done — SwiftUI console UI, VideoToolbox/Metal, touch/trackpad/hotkeys, live path/resolution/fps controls |
+| `client-android` | Implemented — Jetpack Compose console UI matching iOS, MediaCodec H.265/H.264 + Opus, CameraX/ZXing QR, JNI `waystone-rtc` |
 
 See [`docs/STATUS.md`](docs/STATUS.md) for architecture details and remaining
 roadmap items.
@@ -72,7 +75,11 @@ cargo zigbuild --release -p waystone-host --target x86_64-pc-windows-gnu
 
 # iOS WaystoneRTC.xcframework
 client-ios/scripts/build-rust.sh release
+
+# Android libwaystone_rtc.so
+client-android/scripts/build-rust.sh release
 ```
 
 For iOS app building and deployment, see [`client-ios/README.md`](client-ios/README.md).
+For Android app building, see [`client-android/README.md`](client-android/README.md).
 For server deployment, see [`crates/waystoned/README.md`](crates/waystoned/README.md).

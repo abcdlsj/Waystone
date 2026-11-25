@@ -86,13 +86,18 @@ pub fn enable_destination_info(socket: &UdpSocket) -> io::Result<()> {
         (libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO),
     ];
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let options: &[(libc::c_int, libc::c_int)] = &[
         (libc::IPPROTO_IP, libc::IP_PKTINFO),
-        (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO),
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO),
     ];
 
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android"
+    )))]
     let options: &[(libc::c_int, libc::c_int)] = &[];
 
     let mut enabled = false;
@@ -202,7 +207,7 @@ fn destination_from_control(header: &libc::msghdr) -> Option<IpAddr> {
     None
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn destination_from_control(header: &libc::msghdr) -> Option<IpAddr> {
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(header) };
     while !cmsg.is_null() {
@@ -229,7 +234,12 @@ fn destination_from_control(header: &libc::msghdr) -> Option<IpAddr> {
 
 #[cfg(all(
     unix,
-    not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android"
+    ))
 ))]
 fn destination_from_control(_header: &libc::msghdr) -> Option<IpAddr> {
     None

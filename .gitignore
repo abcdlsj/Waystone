@@ -11,6 +11,13 @@ xcuserdata/
 !*.xcodeproj/project.pbxproj
 client-ios/Vendor/
 
+# Android
+client-android/.gradle/
+client-android/.idea/
+client-android/local.properties
+client-android/app/build/
+client-android/app/src/main/jniLibs/
+
 # Runtime data
 /data/
 *.log

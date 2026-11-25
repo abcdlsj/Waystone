@@ -19,6 +19,7 @@ crates/waystone-rtc       传输：str0m 单所有者引擎 + sans-io STUN/TURN 
 crates/waystoned          服务端：HTTPS 面板 + WSS 信令 + 内嵌 TURN + SQLite
 host/waystone-host        被控端：平台无关的会话/输入/信令 + src/platform/{macos,windows}
 client-ios                iOS 控制端：SwiftUI + VideoToolbox + Metal + AVAudioEngine
+client-android            Android 控制端：Jetpack Compose + MediaCodec + AudioTrack + JNI (`waystone-rtc`)
 docs/                     设计文档、本文件、验收报告与截图
 ```
 

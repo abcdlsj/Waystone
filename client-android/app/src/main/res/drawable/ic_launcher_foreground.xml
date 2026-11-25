@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <!-- Standing boundary stone matching docs/brand/icon.svg, inset inside adaptive safe zone. -->
+    <group
+        android:pivotX="512"
+        android:pivotY="512"
+        android:scaleX="0.66"
+        android:scaleY="0.66">
+        <path
+            android:fillColor="#E9E3D7"
+            android:fillType="evenOdd"
+            android:pathData="M330,840 L366,352 C380,190 644,190 658,352 L694,840 Z M462,488 L462,652 L598,570 Z" />
+    </group>
+</vector>
