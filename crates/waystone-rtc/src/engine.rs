@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 
 use waystone_proto::Viewport;
 
+use crate::punch::{self, HostSpray, PunchPacket, PunchedSocket};
 use crate::stun::{class, method, Builder, Message};
 use crate::turn::{Event as TurnEvent, Received as TurnReceived, TurnClient};
 
@@ -427,6 +428,8 @@ struct Driver {
     socket: UdpSocket,
     /// The IPv6 socket next to the default `0.0.0.0` one, with its address.
     socket6: Option<(UdpSocket, SocketAddr)>,
+    /// Winning ephemeral IPv4 socket from NAT3<->NAT4 birthday hole punching.
+    punch_socket: Option<(UdpSocket, SocketAddr)>,
     rx: UnboundedReceiver<Command>,
     media_rx: mpsc::Receiver<Media>,
     video: Arc<VideoQueue>,
@@ -443,6 +446,17 @@ struct Driver {
     /// Remote relay candidates, used to tell whether the selected pair is
     /// relayed on the remote side.
     remote_relays: HashSet<SocketAddr>,
+    /// Peer's public IPv4 server-reflexive address, used if the session falls
+    /// back to a TURN relay and attempts NAT3<->NAT4 birthday punching.
+    remote_srflx: Option<SocketAddr>,
+    /// True once birthday punching has been initiated for this session.
+    punch_started: bool,
+    /// Host-side paced NAT3 pinhole spray.
+    host_spray: Option<HostSpray>,
+    /// Controller-side pending birthday punch result.
+    punch_rx: Option<tokio::sync::oneshot::Receiver<Option<PunchedSocket>>>,
+    /// Cancels an in-flight controller burst when direct path wins or on stop.
+    punch_cancel: Option<tokio::sync::oneshot::Sender<()>>,
     /// Local and remote address of the pair media currently flows on.
     path: Option<(SocketAddr, SocketAddr)>,
     relayed: bool,
@@ -508,6 +522,7 @@ impl Driver {
                 let address = socket.local_addr().ok()?;
                 Some((socket, address))
             }),
+            punch_socket: None,
             rx,
             media_rx,
             video,
@@ -520,6 +535,11 @@ impl Driver {
             turn: None,
             reflexive: None,
             remote_relays: HashSet::new(),
+            remote_srflx: None,
+            punch_started: false,
+            host_spray: None,
+            punch_rx: None,
+            punch_cancel: None,
             path: None,
             relayed: false,
             rtt_ms: None,
@@ -541,6 +561,7 @@ impl Driver {
 
         let mut buf = vec![0u8; 2048];
         let mut buf6 = vec![0u8; 2048];
+        let mut buf_punch = vec![0u8; 2048];
         loop {
             if self.closed {
                 break;
@@ -589,6 +610,24 @@ impl Driver {
                         self.socket6 = None;
                     }
                 },
+                received = recv_optional(self.punch_socket.as_ref(), &mut buf_punch) => match received {
+                    Ok((datagram, local)) => {
+                        let len = datagram.len;
+                        self.handle_datagram(&buf_punch[..len], datagram.source, datagram.destination, local);
+                    }
+                    Err(error) if is_transient(&error) => debug!("punched socket read failed: {error}"),
+                    Err(error) => {
+                        warn!("punched socket read failed, closing it: {error}");
+                        self.punch_socket = None;
+                    }
+                },
+                punched = wait_punch(&mut self.punch_rx) => {
+                    self.punch_rx = None;
+                    self.punch_cancel = None;
+                    if let Some(punched) = punched {
+                        self.install_punched_socket(punched);
+                    }
+                }
                 mapped = wait_mapping(&mut self.mapping) => {
                     self.mapping = None;
                     if let Some((external, base)) = mapped {
@@ -601,6 +640,10 @@ impl Driver {
                 _ = &mut sleep => self.handle_timeout(Instant::now()),
             }
         }
+
+        // Cancel any in-flight birthday punch before tearing down.
+        self.punch_cancel = None;
+        self.host_spray = None;
 
         // Release the allocation instead of letting it linger for ten minutes.
         if let Some(turn) = self.turn.as_mut() {
@@ -616,6 +659,12 @@ impl Driver {
         self.rtc.handle_input(Input::Timeout(now)).ok();
         if let Some(turn) = self.turn.as_mut() {
             turn.handle_timeout(now);
+        }
+        if let Some(spray) = self.host_spray.as_mut() {
+            spray.step(&self.socket, now);
+            if spray.is_done() {
+                self.host_spray = None;
+            }
         }
         if let Some(probe) = self.reflexive.as_mut() {
             if now >= probe.next_send {
@@ -651,7 +700,8 @@ impl Driver {
                 Ok(Output::Timeout(deadline)) => {
                     let turn = self.turn.as_ref().and_then(|turn| turn.poll_timeout());
                     let probe = self.reflexive.as_ref().map(|probe| probe.next_send);
-                    return [Some(deadline), turn, probe]
+                    let spray = self.host_spray.as_ref().and_then(HostSpray::next_deadline);
+                    return [Some(deadline), turn, probe, spray]
                         .into_iter()
                         .flatten()
                         .min()
@@ -699,6 +749,15 @@ impl Driver {
                         }
                         debug!("relay path to {destination} not ready, dropping datagram");
                     }
+                }
+                return;
+            }
+        }
+
+        if let Some((ref sock, addr)) = self.punch_socket {
+            if source == addr {
+                if let Err(error) = sock.send_to(payload, destination).await {
+                    debug!("punched socket send to {destination} failed: {error}");
                 }
                 return;
             }
@@ -784,6 +843,12 @@ impl Driver {
         );
         self.apply_bitrate_ceiling();
         self.emit_path();
+        if self.relayed {
+            self.maybe_start_punch();
+        } else {
+            self.punch_cancel = None;
+            self.host_spray = None;
+        }
     }
 
     /// True when either end of the pair is a relay candidate.
@@ -813,6 +878,9 @@ impl Driver {
     ) {
         let now = Instant::now();
         if self.handle_reflexive_response(datagram, from) {
+            return;
+        }
+        if self.handle_punch_packet(datagram, from) {
             return;
         }
 
@@ -1017,9 +1085,98 @@ impl Driver {
         let address = candidate.addr();
         if candidate.kind() == CandidateKind::Relayed {
             self.remote_relays.insert(address);
+        } else if candidate.kind() == CandidateKind::ServerReflexive
+            && punch::is_punchable_ipv4(address)
+            && self.remote_srflx.is_none()
+        {
+            self.remote_srflx = Some(address);
+            self.maybe_start_punch();
         }
         if let Some(turn) = self.turn.as_mut() {
             turn.add_peer(address, Instant::now());
+        }
+    }
+
+    /// Starts one-shot NAT3<->NAT4 birthday hole punching once the session is
+    /// connected over a TURN relay and both ends have exchanged `srflx` IPv4s.
+    fn maybe_start_punch(&mut self) {
+        if self.punch_started
+            || self.config.relay_only
+            || !self.connected
+            || !self.relayed
+            || self.turn.is_none()
+        {
+            return;
+        }
+        let Some(peer_srflx) = self.remote_srflx else {
+            return;
+        };
+        self.punch_started = true;
+        match self.config.role {
+            Role::Host => {
+                info!(
+                    "relayed session: spraying {} NAT3 pinholes toward {}",
+                    punch::HOST_SPRAY_TOTAL,
+                    peer_srflx.ip()
+                );
+                let now = Instant::now();
+                let mut spray = HostSpray::new(peer_srflx.ip(), now);
+                spray.step(&self.socket, now);
+                if !spray.is_done() {
+                    self.host_spray = Some(spray);
+                }
+            }
+            Role::Controller => {
+                info!("relayed session: starting birthday punch burst toward {peer_srflx}");
+                let local_ip = route_ip(peer_srflx.ip()).unwrap_or(self.local_addr.ip());
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                self.punch_rx = Some(result_rx);
+                self.punch_cancel = Some(cancel_tx);
+                tokio::spawn(async move {
+                    let result = punch::run_controller_burst(peer_srflx, local_ip, cancel_rx).await;
+                    let _ = result_tx.send(result);
+                });
+            }
+        }
+    }
+
+    /// Consumes birthday-punch control packets so they never enter `str0m`.
+    fn handle_punch_packet(&mut self, datagram: &[u8], from: SocketAddr) -> bool {
+        let Some(packet) = punch::decode(datagram) else {
+            return false;
+        };
+        if let PunchPacket::Hit(token) = packet {
+            if self.config.role == Role::Host
+                && self
+                    .remote_srflx
+                    .is_some_and(|srflx| srflx.ip() == from.ip())
+            {
+                self.host_spray = None;
+                let ack = punch::encode_ack(token);
+                for _ in 0..3 {
+                    let _ = self.socket.try_send_to(&ack, from);
+                }
+                info!("birthday punch hit from {from}, promoting direct candidate");
+                if let Ok(candidate) = Candidate::host(from, "udp") {
+                    self.rtc.add_remote_candidate(candidate);
+                }
+            }
+        }
+        true
+    }
+
+    /// Registers the controller's winning punched socket with `str0m` so ICE
+    /// checks flow through the open pinhole and upgrade media off the relay.
+    fn install_punched_socket(&mut self, punched: PunchedSocket) {
+        let local_addr = punched.local_addr;
+        self.punch_socket = Some((punched.socket, local_addr));
+        match Candidate::host(local_addr, "udp") {
+            Ok(candidate) => {
+                info!("promoting punched socket {local_addr} for direct ICE");
+                self.add_local_candidate(candidate);
+            }
+            Err(error) => warn!("punched candidate rejected: {error}"),
         }
     }
 
@@ -1080,6 +1237,7 @@ impl Driver {
                 self.connected = true;
                 (self.config.sink)(Event::Connected);
                 self.resolve_media();
+                self.maybe_start_punch();
             }
             RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                 (self.config.sink)(Event::Disconnected)
@@ -1487,6 +1645,16 @@ async fn recv_optional(
             let datagram = crate::net::recv_with_destination(socket, buffer).await?;
             Ok((datagram, *local))
         }
+        None => std::future::pending().await,
+    }
+}
+
+/// Waits for the controller birthday punch result, or forever when none is pending.
+async fn wait_punch(
+    pending: &mut Option<tokio::sync::oneshot::Receiver<Option<PunchedSocket>>>,
+) -> Option<PunchedSocket> {
+    match pending {
+        Some(receiver) => receiver.await.ok().flatten(),
         None => std::future::pending().await,
     }
 }

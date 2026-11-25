@@ -15,6 +15,7 @@ pub mod ffi;
 pub mod net;
 #[cfg(feature = "port-mapping")]
 mod portmap;
+mod punch;
 pub mod stun;
 pub mod turn;
 
