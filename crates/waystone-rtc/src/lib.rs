@@ -13,6 +13,7 @@
 pub mod engine;
 pub mod ffi;
 pub mod net;
+mod pacer;
 #[cfg(feature = "port-mapping")]
 mod portmap;
 mod punch;

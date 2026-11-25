@@ -1282,10 +1282,7 @@ impl Encoder {
             &CODECAPI_AVEncCommonRateControlMode,
             u32_variant(eAVEncCommonRateControlMode_CBR.0 as u32),
         );
-        self.set_codec_value(
-            &CODECAPI_AVEncCommonMeanBitRate,
-            u32_variant(settings.bitrate),
-        );
+        self.apply_rate_limits(settings.bitrate);
         self.set_codec_value(&CODECAPI_AVLowLatencyMode, bool_variant(true));
         self.set_codec_value(&CODECAPI_AVEncMPVDefaultBPictureCount, u32_variant(0));
         // Keyframes come on request; a huge GOP avoids periodic bursts.
@@ -1356,7 +1353,19 @@ impl Encoder {
     }
 
     fn set_bitrate(&mut self, bitrate: u32) {
+        self.apply_rate_limits(bitrate);
+    }
+
+    /// Sets mean bitrate alongside a tight VBV buffer (~125 ms) and 1.25x max
+    /// bitrate so forced IDR keyframes stay compact (~40-60 KB) instead of
+    /// spiking past residential uplink burst limits.
+    fn apply_rate_limits(&self, bitrate: u32) {
+        let max_bitrate = bitrate.saturating_add(bitrate / 4);
+        // `CODECAPI_AVEncCommonBufferSize` is in bytes; bitrate / 64 ~= 125 ms.
+        let vbv_bytes = (bitrate / 64).clamp(32 * 1024, 180 * 1024);
         self.set_codec_value(&CODECAPI_AVEncCommonMeanBitRate, u32_variant(bitrate));
+        self.set_codec_value(&CODECAPI_AVEncCommonMaxBitRate, u32_variant(max_bitrate));
+        self.set_codec_value(&CODECAPI_AVEncCommonBufferSize, u32_variant(vbv_bytes));
     }
 
     fn set_frame_rate(&mut self, fps: u32) {

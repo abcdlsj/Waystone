@@ -23,7 +23,9 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use hmac::{Hmac, Mac};
 use rand::Rng;
+use sha1::Sha1;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use tracing::{debug, info};
@@ -56,6 +58,51 @@ const CONTROLLER_WAVES: usize = 4;
 const CONTROLLER_WAVE_WAIT: Duration = Duration::from_millis(380);
 const CONTROLLER_RESEND_AFTER: Duration = Duration::from_millis(120);
 const CONTROLLER_POLL_STEP: Duration = Duration::from_millis(15);
+
+/// Maximum birthday-punch attempts per relayed session (initial + retries).
+pub const MAX_PUNCH_ATTEMPTS: u8 = 3;
+/// Delays before retry rounds 2 and 3 if the session is still relayed.
+pub const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(4), Duration::from_secs(10)];
+
+/// Derives an authenticated 8-byte punch token shared by host and controller
+/// from the SDP offer's ICE credentials (`ice-ufrag` and `ice-pwd`).
+///
+/// Authenticating the `WSP2` hit packet with this token lets the host accept
+/// direct punches even when a corporate or cellular NAT4 pool exits through a
+/// different public IPv4 than the one observed by STUN.
+pub fn derive_session_token(offer_sdp: &str) -> Option<[u8; 8]> {
+    let mut ufrag: Option<&str> = None;
+    let mut pwd: Option<&str> = None;
+    for line in offer_sdp.lines() {
+        let trimmed = line.trim();
+        if ufrag.is_none() {
+            if let Some(val) = trimmed.strip_prefix("a=ice-ufrag:") {
+                if !val.is_empty() {
+                    ufrag = Some(val);
+                }
+            }
+        }
+        if pwd.is_none() {
+            if let Some(val) = trimmed.strip_prefix("a=ice-pwd:") {
+                if !val.is_empty() {
+                    pwd = Some(val);
+                }
+            }
+        }
+        if ufrag.is_some() && pwd.is_some() {
+            break;
+        }
+    }
+    let (ufrag, pwd) = (ufrag?, pwd?);
+    let mut mac = Hmac::<Sha1>::new_from_slice(b"waystone-punch-v1").ok()?;
+    mac.update(ufrag.as_bytes());
+    mac.update(b":");
+    mac.update(pwd.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    let mut token = [0u8; 8];
+    token.copy_from_slice(&digest[..8]);
+    Some(token)
+}
 
 /// A decoded punch control datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +241,7 @@ pub struct PunchedSocket {
 pub async fn run_controller_burst(
     host_srflx: SocketAddr,
     local_ip: IpAddr,
+    session_token: Option<[u8; 8]>,
     mut cancel: oneshot::Receiver<()>,
 ) -> Option<PunchedSocket> {
     // Let the host open its first pinhole waves before bursting.
@@ -202,8 +250,11 @@ pub async fn run_controller_burst(
         _ = tokio::time::sleep(CONTROLLER_START_DELAY) => {}
     }
 
-    let mut token = [0u8; 8];
-    rand::rng().fill(&mut token);
+    let token = session_token.unwrap_or_else(|| {
+        let mut random = [0u8; 8];
+        rand::rng().fill(&mut random);
+        random
+    });
     let hit = encode_hit(token);
     let bind_addr = if local_ip.is_ipv4() && !local_ip.is_unspecified() {
         SocketAddr::new(local_ip, 0)
@@ -255,6 +306,7 @@ pub async fn run_controller_burst(
                     if from == host_srflx && decode(&buf[..len]) == Some(PunchPacket::Ack(token)) {
                         let winner = sockets.swap_remove(idx);
                         drop(sockets);
+                        crate::net::configure_udp_buffers(&winner);
                         let _ = crate::net::enable_destination_info(&winner);
                         let port = winner.local_addr().ok()?.port();
                         let concrete_ip = winner
@@ -346,11 +398,23 @@ mod tests {
         });
 
         let (_tx, cancel) = oneshot::channel();
-        let punched = run_controller_burst(host_addr, "127.0.0.1".parse().unwrap(), cancel)
+        let token = Some([9u8; 8]);
+        let punched = run_controller_burst(host_addr, "127.0.0.1".parse().unwrap(), token, cancel)
             .await
             .expect("burst should win on loopback echo");
         assert_eq!(punched.local_addr.ip(), IpAddr::from([127, 0, 0, 1]));
         assert_ne!(punched.local_addr.port(), 0);
         echo.await.unwrap();
+    }
+
+    #[test]
+    fn derives_stable_token_from_offer_ice_credentials() {
+        let sdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=ice-ufrag:abcd\r\na=ice-pwd:supersecretpassword1234\r\n";
+        let t1 = derive_session_token(sdp).expect("token should derive");
+        let t2 = derive_session_token(sdp).expect("token should be deterministic");
+        assert_eq!(t1, t2);
+        let other = "v=0\r\na=ice-ufrag:efgh\r\na=ice-pwd:supersecretpassword1234\r\n";
+        assert_ne!(t1, derive_session_token(other).unwrap());
+        assert!(derive_session_token("v=0\r\n").is_none());
     }
 }

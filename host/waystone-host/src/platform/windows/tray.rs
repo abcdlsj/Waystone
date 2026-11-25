@@ -491,10 +491,11 @@ impl App {
                 // Stop any standalone agent first so the newly installed service
                 // takes over the signaling session cleanly.
                 self.stop_standalone_agent();
-                if !run_elevated_subcommand("service install") {
-                    if self.mode == Mode::Standalone && self.config.is_some() {
-                        self.start_agent();
-                    }
+                if !run_elevated_subcommand("service install")
+                    && self.mode == Mode::Standalone
+                    && self.config.is_some()
+                {
+                    self.start_agent();
                 }
             }
             item::START_SERVICE => {

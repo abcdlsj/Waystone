@@ -14,7 +14,35 @@ use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 
+use socket2::SockRef;
 use tokio::net::UdpSocket;
+use tracing::debug;
+
+/// Preferred UDP kernel buffer sizes, tried from largest to smallest so OS caps
+/// (such as macOS/iOS `kern.ipc.maxsockbuf`) degrade gracefully without failing.
+const UDP_BUFFER_CANDIDATES: [usize; 4] =
+    [4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024, 512 * 1024];
+
+/// Raises `SO_SNDBUF` and `SO_RCVBUF` on a media UDP socket so keyframe bursts
+/// do not overflow the 64 KiB Windows default buffer.
+pub fn configure_udp_buffers(socket: &UdpSocket) {
+    let sock = SockRef::from(socket);
+    for size in UDP_BUFFER_CANDIDATES {
+        if sock.set_send_buffer_size(size).is_ok() {
+            break;
+        }
+    }
+    for size in UDP_BUFFER_CANDIDATES {
+        if sock.set_recv_buffer_size(size).is_ok() {
+            break;
+        }
+    }
+    debug!(
+        "udp socket buffers: send={} KiB, recv={} KiB",
+        sock.send_buffer_size().unwrap_or(0) / 1024,
+        sock.recv_buffer_size().unwrap_or(0) / 1024
+    );
+}
 
 /// One datagram plus the local address it was delivered to.
 pub struct Datagram {

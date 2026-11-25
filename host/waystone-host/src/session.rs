@@ -205,6 +205,7 @@ impl Session {
         let engine = Engine::start(config)
             .await
             .context("starting the transport")?;
+        engine.set_video_bitrate(plan.bitrate);
 
         Ok(Session {
             id: request.id.clone(),
@@ -599,6 +600,7 @@ impl Session {
     }
 
     fn apply_bitrate(&self, bitrate: u32) {
+        self.engine.set_video_bitrate(bitrate);
         match &self.backend {
             SessionBackend::Direct { capture, .. } => {
                 if let Some(capture) = capture {
@@ -639,6 +641,7 @@ impl Session {
     }
 
     fn apply_resolution(&mut self, width: u32, height: u32, bitrate: u32) {
+        self.engine.set_video_bitrate(bitrate);
         let mut restart = false;
         match &mut self.backend {
             SessionBackend::Direct { capture, .. } => {

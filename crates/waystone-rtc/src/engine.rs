@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::format::Codec;
-use str0m::media::Frequency;
-use str0m::media::{Direction, MediaKind, MediaTime, Mid, Pt};
+use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{
     Candidate, CandidateKind, Event as RtcEvent, IceConnectionState, Input, Output, Rtc, RtcConfig,
@@ -27,6 +26,7 @@ use tracing::{debug, info, warn};
 
 use waystone_proto::Viewport;
 
+use crate::pacer::{self, MediaPacer};
 use crate::punch::{self, HostSpray, PunchPacket, PunchedSocket};
 use crate::stun::{class, method, Builder, Message};
 use crate::turn::{Event as TurnEvent, Received as TurnReceived, TurnClient};
@@ -298,6 +298,7 @@ impl Engine {
         // differ in their IP address; the destination address of each datagram is
         // read from the ancillary data instead.
         let socket = UdpSocket::bind(bind).await?;
+        crate::net::configure_udp_buffers(&socket);
         if let Err(error) = crate::net::enable_destination_info(&socket) {
             warn!("cannot report datagram destinations: {error}");
         }
@@ -422,6 +423,12 @@ struct ReflexiveProbe {
 
 const REFLEXIVE_TRANSMISSIONS: u32 = 4;
 const REFLEXIVE_RTO: Duration = Duration::from_millis(250);
+/// Tighter receive reordering windows than str0m's 30-frame default (~500 ms)
+/// so unrecoverable loss triggers PLI recovery quickly instead of stalling.
+const REORDERING_SIZE_VIDEO: usize = 8;
+const REORDERING_SIZE_AUDIO: usize = 6;
+/// Minimum spacing between receiver-initiated RTCP PLI requests.
+const PLI_MIN_INTERVAL: Duration = Duration::from_millis(300);
 
 struct Driver {
     config: EngineConfig,
@@ -449,14 +456,24 @@ struct Driver {
     /// Peer's public IPv4 server-reflexive address, used if the session falls
     /// back to a TURN relay and attempts NAT3<->NAT4 birthday punching.
     remote_srflx: Option<SocketAddr>,
-    /// True once birthday punching has been initiated for this session.
-    punch_started: bool,
+    /// Number of birthday-punch rounds started in this session.
+    punch_attempts: u8,
+    /// Scheduled time for the next birthday-punch retry while relayed.
+    punch_next_retry: Option<Instant>,
+    /// Session-derived token shared via the SDP offer's ICE credentials.
+    punch_token: Option<[u8; 8]>,
     /// Host-side paced NAT3 pinhole spray.
     host_spray: Option<HostSpray>,
     /// Controller-side pending birthday punch result.
     punch_rx: Option<tokio::sync::oneshot::Receiver<Option<PunchedSocket>>>,
     /// Cancels an in-flight controller burst when direct path wins or on stop.
     punch_cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Smooths outgoing large video RTP bursts on the host side.
+    pacer: MediaPacer,
+    /// True after str0m reports a non-contiguous video frame; drops P-frames
+    /// until a fresh keyframe lands so the decoder does not stall on corrupt refs.
+    video_awaiting_keyframe: bool,
+    last_pli: Option<Instant>,
     /// Local and remote address of the pair media currently flows on.
     path: Option<(SocketAddr, SocketAddr)>,
     relayed: bool,
@@ -500,8 +517,11 @@ impl Driver {
         rtc_config.codec_config().enable_opus(true, false);
         // BWE is opt-in: without feedback the pacer would throttle the video to
         // the initial estimate, so the default is a fixed high ceiling with the
-        // encoder doing the rate control.
-        let rtc_config = rtc_config.set_stats_interval(Some(Duration::from_secs(1)));
+        // encoder doing the rate control and our own MediaPacer smoothing bursts.
+        let rtc_config = rtc_config
+            .set_stats_interval(Some(Duration::from_secs(1)))
+            .set_reordering_size_video(REORDERING_SIZE_VIDEO)
+            .set_reordering_size_audio(REORDERING_SIZE_AUDIO);
         let bwe_enabled = std::env::var_os("WAYSTONE_BWE").is_some();
         let rtc_config = if bwe_enabled {
             rtc_config.enable_bwe(Some(str0m::bwe::Bitrate::mbps(2)))
@@ -513,9 +533,10 @@ impl Driver {
             .session
             .map(|session| session.max_video_bitrate)
             .unwrap_or(8_000_000);
+        let now = Instant::now();
 
         Driver {
-            rtc: rtc_config.build(Instant::now()),
+            rtc: rtc_config.build(now),
             config,
             socket,
             socket6: socket6.and_then(|socket| {
@@ -536,10 +557,15 @@ impl Driver {
             reflexive: None,
             remote_relays: HashSet::new(),
             remote_srflx: None,
-            punch_started: false,
+            punch_attempts: 0,
+            punch_next_retry: None,
+            punch_token: None,
             host_spray: None,
             punch_rx: None,
             punch_cancel: None,
+            pacer: MediaPacer::new(now, video_bitrate),
+            video_awaiting_keyframe: false,
+            last_pli: None,
             path: None,
             relayed: false,
             rtt_ms: None,
@@ -626,6 +652,8 @@ impl Driver {
                     self.punch_cancel = None;
                     if let Some(punched) = punched {
                         self.install_punched_socket(punched);
+                    } else {
+                        self.schedule_punch_retry(Instant::now());
                     }
                 }
                 mapped = wait_mapping(&mut self.mapping) => {
@@ -643,6 +671,7 @@ impl Driver {
 
         // Cancel any in-flight birthday punch before tearing down.
         self.punch_cancel = None;
+        self.punch_next_retry = None;
         self.host_spray = None;
 
         // Release the allocation instead of letting it linger for ten minutes.
@@ -664,6 +693,13 @@ impl Driver {
             spray.step(&self.socket, now);
             if spray.is_done() {
                 self.host_spray = None;
+                self.schedule_punch_retry(now);
+            }
+        }
+        if let Some(retry_at) = self.punch_next_retry {
+            if now >= retry_at {
+                self.punch_next_retry = None;
+                self.maybe_start_punch();
             }
         }
         if let Some(probe) = self.reflexive.as_mut() {
@@ -690,6 +726,7 @@ impl Driver {
     /// owner of the `Rtc`, so it may await here without breaking the invariant.
     async fn drain(&mut self) -> Instant {
         loop {
+            self.flush_pacer().await;
             // TURN events can add a local candidate, which is an `Rtc` mutation,
             // so they are handled before polling the session again.
             self.flush_turn().await;
@@ -698,10 +735,13 @@ impl Driver {
             }
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(deadline)) => {
+                    self.flush_pacer().await;
                     let turn = self.turn.as_ref().and_then(|turn| turn.poll_timeout());
                     let probe = self.reflexive.as_ref().map(|probe| probe.next_send);
                     let spray = self.host_spray.as_ref().and_then(HostSpray::next_deadline);
-                    return [Some(deadline), turn, probe, spray]
+                    let pacer = self.pacer.next_deadline();
+                    let retry = self.punch_next_retry;
+                    return [Some(deadline), turn, probe, spray, pacer, retry]
                         .into_iter()
                         .flatten()
                         .min()
@@ -709,7 +749,7 @@ impl Driver {
                 }
                 Ok(Output::Transmit(transmit)) => {
                     let bytes: Vec<u8> = transmit.contents.into();
-                    self.send_transmit(transmit.source, transmit.destination, &bytes)
+                    self.send_transmit(transmit.source, transmit.destination, bytes)
                         .await;
                 }
                 Ok(Output::Event(event)) => self.handle_rtc_event(event),
@@ -721,17 +761,50 @@ impl Driver {
         }
     }
 
-    /// Sends one datagram the session produced.
-    ///
-    /// A transmit whose source is our relay address is wrapped for the TURN
-    /// allocation (ChannelData or a Send indication) and goes to the server;
-    /// anything else goes straight to its destination.
-    async fn send_transmit(&mut self, source: SocketAddr, destination: SocketAddr, payload: &[u8]) {
-        if !Message::is_stun(payload) {
+    /// Sends one datagram the session produced, pacing large host video RTP
+    /// packets so keyframe bursts do not overflow shallow residential uplinks.
+    async fn send_transmit(
+        &mut self,
+        source: SocketAddr,
+        destination: SocketAddr,
+        payload: Vec<u8>,
+    ) {
+        if !Message::is_stun(&payload) {
             // Only the selected pair carries DTLS, SRTP and SCTP.
             self.observe_path(source, destination);
         }
 
+        if self.config.role == Role::Host && !self.bwe_enabled && pacer::should_pace(&payload) {
+            let now = Instant::now();
+            if !self.pacer.try_consume_immediate(payload.len(), now) {
+                self.pacer.enqueue(source, destination, payload);
+                return;
+            }
+        }
+
+        self.send_datagram_now(source, destination, &payload).await;
+    }
+
+    /// Flushes any paced datagrams whose token budget is ready.
+    async fn flush_pacer(&mut self) {
+        let now = Instant::now();
+        while let Some(datagram) = self.pacer.poll_ready(now) {
+            self.send_datagram_now(datagram.source, datagram.destination, &datagram.payload)
+                .await;
+        }
+    }
+
+    /// Writes one datagram immediately to the right socket (or TURN relay).
+    ///
+    /// A transmit whose source is our relay address is wrapped for the TURN
+    /// allocation (ChannelData or a Send indication) and goes to the server;
+    /// anything else goes straight to its destination.
+    async fn send_datagram_now(
+        &mut self,
+        source: SocketAddr,
+        destination: SocketAddr,
+        payload: &[u8],
+    ) {
         if let Some(turn) = self.turn.as_mut() {
             if turn.relayed() == Some(source) {
                 match turn.encapsulate(destination, payload) {
@@ -847,6 +920,7 @@ impl Driver {
             self.maybe_start_punch();
         } else {
             self.punch_cancel = None;
+            self.punch_next_retry = None;
             self.host_spray = None;
         }
     }
@@ -1097,10 +1171,13 @@ impl Driver {
         }
     }
 
-    /// Starts one-shot NAT3<->NAT4 birthday hole punching once the session is
-    /// connected over a TURN relay and both ends have exchanged `srflx` IPv4s.
+    /// Starts NAT3<->NAT4 birthday hole punching once the session is connected
+    /// over a TURN relay and both ends have exchanged `srflx` IPv4s.
     fn maybe_start_punch(&mut self) {
-        if self.punch_started
+        if self.punch_attempts >= punch::MAX_PUNCH_ATTEMPTS
+            || self.host_spray.is_some()
+            || self.punch_rx.is_some()
+            || self.punch_next_retry.is_some()
             || self.config.relay_only
             || !self.connected
             || !self.relayed
@@ -1111,34 +1188,64 @@ impl Driver {
         let Some(peer_srflx) = self.remote_srflx else {
             return;
         };
-        self.punch_started = true;
+        self.punch_attempts += 1;
+        let attempt = self.punch_attempts;
         match self.config.role {
             Role::Host => {
                 info!(
-                    "relayed session: spraying {} NAT3 pinholes toward {}",
+                    "relayed session: spraying {} NAT3 pinholes toward {} (attempt {}/{})",
                     punch::HOST_SPRAY_TOTAL,
-                    peer_srflx.ip()
+                    peer_srflx.ip(),
+                    attempt,
+                    punch::MAX_PUNCH_ATTEMPTS
                 );
                 let now = Instant::now();
                 let mut spray = HostSpray::new(peer_srflx.ip(), now);
                 spray.step(&self.socket, now);
                 if !spray.is_done() {
                     self.host_spray = Some(spray);
+                } else {
+                    self.schedule_punch_retry(now);
                 }
             }
             Role::Controller => {
-                info!("relayed session: starting birthday punch burst toward {peer_srflx}");
+                info!(
+                    "relayed session: starting birthday punch burst toward {peer_srflx} (attempt {}/{})",
+                    attempt,
+                    punch::MAX_PUNCH_ATTEMPTS
+                );
                 let local_ip = route_ip(peer_srflx.ip()).unwrap_or(self.local_addr.ip());
+                let session_token = self.punch_token;
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                 self.punch_rx = Some(result_rx);
                 self.punch_cancel = Some(cancel_tx);
                 tokio::spawn(async move {
-                    let result = punch::run_controller_burst(peer_srflx, local_ip, cancel_rx).await;
+                    let result =
+                        punch::run_controller_burst(peer_srflx, local_ip, session_token, cancel_rx)
+                            .await;
                     let _ = result_tx.send(result);
                 });
             }
         }
+    }
+
+    fn schedule_punch_retry(&mut self, now: Instant) {
+        if !self.relayed
+            || !self.connected
+            || self.punch_attempts >= punch::MAX_PUNCH_ATTEMPTS
+            || self.punch_next_retry.is_some()
+        {
+            return;
+        }
+        let idx =
+            (self.punch_attempts.saturating_sub(1) as usize).min(punch::RETRY_DELAYS.len() - 1);
+        let delay = punch::RETRY_DELAYS[idx];
+        debug!(
+            "birthday punch attempt {} did not upgrade yet; retrying in {:?}",
+            self.punch_attempts, delay
+        );
+        self.punch_next_retry = Some(now + delay);
     }
 
     /// Consumes birthday-punch control packets so they never enter `str0m`.
@@ -1147,12 +1254,15 @@ impl Driver {
             return false;
         };
         if let PunchPacket::Hit(token) = packet {
-            if self.config.role == Role::Host
-                && self
-                    .remote_srflx
-                    .is_some_and(|srflx| srflx.ip() == from.ip())
-            {
+            let authorized = self.config.role == Role::Host
+                && punch::is_punchable_ipv4(from)
+                && (self.punch_token.is_some_and(|expected| expected == token)
+                    || self
+                        .remote_srflx
+                        .is_some_and(|srflx| srflx.ip() == from.ip()));
+            if authorized {
                 self.host_spray = None;
+                self.punch_next_retry = None;
                 let ack = punch::encode_ack(token);
                 for _ in 0..3 {
                     let _ = self.socket.try_send_to(&ack, from);
@@ -1226,8 +1336,10 @@ impl Driver {
         // The controller is the offering side, so the first negotiation starts as
         // soon as the media sections and data channels are declared.
         if let Some((offer, pending)) = changes.apply() {
+            let sdp = offer.to_sdp_string();
+            self.punch_token = punch::derive_session_token(&sdp);
             self.pending_offer = Some(pending);
-            (self.config.sink)(Event::LocalOffer(offer.to_sdp_string()));
+            (self.config.sink)(Event::LocalOffer(sdp));
         }
     }
 
@@ -1245,6 +1357,19 @@ impl Driver {
             RtcEvent::MediaData(data) => {
                 let keyframe = data.is_keyframe();
                 if Some(data.mid) == self.video_mid {
+                    if !data.contiguous && !keyframe {
+                        self.video_awaiting_keyframe = true;
+                        self.request_video_pli(data.mid);
+                        return;
+                    }
+                    if self.video_awaiting_keyframe {
+                        if keyframe {
+                            self.video_awaiting_keyframe = false;
+                        } else {
+                            self.request_video_pli(data.mid);
+                            return;
+                        }
+                    }
                     (self.config.sink)(Event::VideoFrame {
                         data: data.data.to_vec(),
                         keyframe,
@@ -1311,10 +1436,17 @@ impl Driver {
         }
     }
 
-    /// Caps the bandwidth estimator target, which only exists with
-    /// `WAYSTONE_BWE`. The encoder itself is clamped by the application, see
-    /// [`TurnConfig::relay_bitrate_ceiling`].
+    /// Updates the outgoing media pacer and, when `WAYSTONE_BWE` is enabled,
+    /// the str0m bandwidth estimator target.
     fn apply_bitrate_ceiling(&mut self) {
+        let relay_ceiling = self
+            .config
+            .turn
+            .as_ref()
+            .map_or(0, |turn| turn.relay_bitrate_ceiling);
+        self.pacer
+            .configure(self.video_bitrate, self.relayed, relay_ceiling);
+
         if !self.bwe_enabled {
             return;
         }
@@ -1326,6 +1458,25 @@ impl Driver {
         let minimum = str0m::bwe::Bitrate::bps(target.min(600_000) as u64);
         let desired = str0m::bwe::Bitrate::bps(target as u64);
         self.rtc.bwe().set_bitrate(minimum, desired);
+    }
+
+    fn request_video_pli(&mut self, mid: Mid) {
+        let now = Instant::now();
+        if self
+            .last_pli
+            .is_some_and(|at| now.duration_since(at) < PLI_MIN_INTERVAL)
+        {
+            return;
+        }
+        if let Some(mut writer) = self.rtc.writer(mid) {
+            match writer.request_keyframe(None, KeyframeRequestKind::Pli) {
+                Ok(()) => {
+                    self.last_pli = Some(now);
+                    debug!("requested video PLI after discontinuity");
+                }
+                Err(error) => debug!("video PLI request failed: {error}"),
+            }
+        }
     }
 
     fn handle_command(&mut self, command: Command) {
@@ -1342,19 +1493,24 @@ impl Driver {
         match command {
             Command::Offer => {
                 if let Some((offer, pending)) = self.rtc.sdp_api().apply() {
+                    let sdp = offer.to_sdp_string();
+                    self.punch_token = punch::derive_session_token(&sdp);
                     self.pending_offer = Some(pending);
-                    (self.config.sink)(Event::LocalOffer(offer.to_sdp_string()));
+                    (self.config.sink)(Event::LocalOffer(sdp));
                 }
             }
-            Command::AcceptOffer(sdp) => match SdpOffer::from_sdp_string(&sdp) {
-                Ok(offer) => match self.rtc.sdp_api().accept_offer(offer) {
-                    Ok(answer) => {
-                        (self.config.sink)(Event::LocalAnswer(answer.to_sdp_string()));
-                    }
-                    Err(error) => self.fail(format!("accept offer: {error}")),
-                },
-                Err(error) => self.fail(format!("parse offer: {error}")),
-            },
+            Command::AcceptOffer(sdp) => {
+                self.punch_token = punch::derive_session_token(&sdp);
+                match SdpOffer::from_sdp_string(&sdp) {
+                    Ok(offer) => match self.rtc.sdp_api().accept_offer(offer) {
+                        Ok(answer) => {
+                            (self.config.sink)(Event::LocalAnswer(answer.to_sdp_string()));
+                        }
+                        Err(error) => self.fail(format!("accept offer: {error}")),
+                    },
+                    Err(error) => self.fail(format!("parse offer: {error}")),
+                }
+            }
             Command::AcceptAnswer(sdp) => match SdpAnswer::from_sdp_string(&sdp) {
                 Ok(answer) => match self.pending_offer.take() {
                     Some(pending) => match self.rtc.sdp_api().accept_answer(pending, answer) {
@@ -1624,6 +1780,7 @@ fn bind_ipv6() -> std::io::Result<UdpSocket> {
     socket.set_nonblocking(true)?;
     socket.bind(&SocketAddr::from(([0u16; 8], 0)).into())?;
     let socket = UdpSocket::from_std(socket.into())?;
+    crate::net::configure_udp_buffers(&socket);
     if let Err(error) = crate::net::enable_destination_info(&socket) {
         debug!("cannot report IPv6 datagram destinations: {error}");
     }
