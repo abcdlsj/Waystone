@@ -10,96 +10,186 @@ struct ControlPanel: View {
     var close: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 0) {
             header
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
 
-            row("触控") {
-                Picker("触控", selection: binding(\.touchMode, session.setTouchMode)) {
-                    ForEach(InputController.Mode.allCases) { Text($0.title).tag($0) }
-                }
-            }
-            row("热键") {
-                Picker("热键", selection: Binding(
-                    get: { preferences.presetId },
-                    set: { session.setPreset(HotkeyPreset.named($0)) })
-                ) {
-                    ForEach(HotkeyPreset.all) { Text($0.name).tag($0.id) }
-                }
-            }
-            row("画质") {
-                Picker("画质", selection: binding(\.frameRate, session.setFrameRate)) {
-                    ForEach(StreamPreferences.FrameRate.allCases) { Text($0.title).tag($0) }
-                }
-            }
-            row("声音") {
-                Picker("声音", selection: binding(\.sound, session.setSound)) {
-                    ForEach(StreamPreferences.Sound.allCases) { Text($0.title).tag($0) }
-                }
-            }
+            Rectangle()
+                .fill(WaystoneTheme.borderSubtle)
+                .frame(height: 0.75)
 
-            HStack(spacing: 10) {
-                Button {
-                    close()
-                    showKeyboard()
-                } label: {
-                    Label("键盘", systemImage: "keyboard")
-                        .frame(maxWidth: .infinity)
+            VStack(spacing: 9) {
+                controlRow("触控") {
+                    WaystoneSegmentedControl(
+                        options: InputController.Mode.allCases,
+                        selection: binding(\.touchMode, session.setTouchMode),
+                        title: \.title
+                    )
                 }
-                if input.geometry.isZoomed {
-                    Button {
-                        input.resetZoom()
-                    } label: {
-                        Label("还原缩放", systemImage: "arrow.down.right.and.arrow.up.left")
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-            }
-            .buttonStyle(.bordered)
 
-            VStack(spacing: 8) {
-                Button(role: .destructive) {
-                    session.hangUp(lock: true)
-                } label: {
-                    Label("断开并锁屏", systemImage: "lock.fill")
-                        .frame(maxWidth: .infinity)
+                controlRow("热键") {
+                    WaystoneSegmentedControl(
+                        options: HotkeyPreset.all,
+                        selection: Binding(
+                            get: { preferences.preset },
+                            set: { session.setPreset($0) }),
+                        title: \.name
+                    )
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                Button("仅断开，不锁屏") { session.hangUp(lock: false) }
-                    .font(.footnote)
-                    .frame(maxWidth: .infinity)
+
+                controlRow("画质") {
+                    WaystoneSegmentedControl(
+                        options: StreamPreferences.FrameRate.allCases,
+                        selection: binding(\.frameRate, session.setFrameRate),
+                        title: \.title
+                    )
+                }
+
+                controlRow("声音") {
+                    WaystoneSegmentedControl(
+                        options: StreamPreferences.Sound.allCases,
+                        selection: binding(\.sound, session.setSound),
+                        title: \.title
+                    )
+                }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            Rectangle()
+                .fill(WaystoneTheme.borderSubtle)
+                .frame(height: 0.75)
+
+            actionFooter
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(WaystoneTheme.footerSurface)
         }
-        .pickerStyle(.segmented)
-        .padding(16)
-        .frame(width: 340)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-        .shadow(radius: 20)
+        .frame(width: 440)
+        .consolePanel(cornerRadius: 8, opacity: 0.96)
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.host.name).font(.headline)
-                PathCapsule(stage: session.stage, path: session.path)
+        HStack(spacing: 10) {
+            Text(session.host.name)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(WaystoneTheme.textPrimary)
+                .lineLimit(1)
+
+            PathCapsule(stage: session.stage, path: session.path)
+
+            Spacer(minLength: 6)
+
+            if input.geometry.isZoomed {
+                Button {
+                    Haptics.tap()
+                    input.resetZoom()
+                } label: {
+                    Text("还原缩放")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(WaystoneTheme.textPrimary)
+                        .padding(.horizontal, 8)
+                        .frame(height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(WaystoneTheme.surfaceRaised)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                                )
+                        )
+                }
+                .buttonStyle(ConsoleButtonStyle())
             }
-            Spacer()
-            Button(action: close) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title2)
-                    .symbolRenderingMode(.hierarchical)
+
+            Button {
+                Haptics.tap()
+                close()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(WaystoneTheme.textSecondary)
+                    .frame(width: 24, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(WaystoneTheme.surfaceRaised)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                            )
+                    )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ConsoleButtonStyle())
             .accessibilityLabel("收起")
         }
     }
 
-    private func row<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+    private var actionFooter: some View {
+        HStack(spacing: 8) {
+            Button {
+                Haptics.tap()
+                close()
+                showKeyboard()
+            } label: {
+                Text("键盘")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(WaystoneTheme.textPrimary)
+                    .padding(.horizontal, 12)
+                    .frame(height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(WaystoneTheme.surfaceRaised)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                            )
+                    )
+            }
+            .buttonStyle(ConsoleButtonStyle())
+
+            Spacer(minLength: 4)
+
+            Button {
+                Haptics.tap()
+                session.hangUp(lock: false)
+            } label: {
+                Text("仅断开，不锁屏")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(WaystoneTheme.textSecondary)
+                    .padding(.horizontal, 11)
+                    .frame(height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                    )
+            }
+            .buttonStyle(ConsoleButtonStyle())
+
+            Button(role: .destructive) {
+                Haptics.tap()
+                session.hangUp(lock: true)
+            } label: {
+                Text("断开并锁屏")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .frame(height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(WaystoneTheme.coral)
+                    )
+            }
+            .buttonStyle(ConsoleButtonStyle())
+        }
+    }
+
+    private func controlRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 10) {
             Text(title)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 30, alignment: .leading)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(WaystoneTheme.textSecondary)
+                .frame(width: 36, alignment: .leading)
             content()
         }
     }
@@ -111,27 +201,47 @@ struct ControlPanel: View {
     }
 }
 
-/// "直连 · 12 ms" in green, "中继 · 40 ms" in yellow (design doc 3.3).
+/// "直连 · 12 ms" in emerald, "中继 · 40 ms" in amber (design doc 3.3).
 struct PathCapsule: View {
     var stage: StreamSession.Stage
     var path: StreamSession.Path
 
     var body: some View {
         HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 7, height: 7)
-            Text(label).font(.caption2.weight(.medium)).monospacedDigit()
+            Circle()
+                .fill(color)
+                .frame(width: 5, height: 5)
+            Text(label)
+                .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(WaystoneTheme.textSecondary)
         }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.black)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                )
+        )
+    }
+
+    private var isStalled: Bool {
+        if case .stalled = stage { return true }
+        return false
     }
 
     private var label: String {
-        if case .stalled = stage { return "网络波动" }
+        if isStalled { return "网络波动" }
         let kind = path.relayed ? "中继" : "直连"
         guard let rtt = path.rttMs else { return kind }
         return "\(kind) · \(rtt) ms"
     }
 
     private var color: Color {
-        if case .stalled = stage { return .orange }
-        return path.relayed ? .yellow : .green
+        if isStalled { return WaystoneTheme.coral }
+        return path.relayed ? WaystoneTheme.amber : WaystoneTheme.emerald
     }
 }

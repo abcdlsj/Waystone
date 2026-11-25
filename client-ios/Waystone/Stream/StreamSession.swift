@@ -60,7 +60,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
     private var healthTimer: Timer?
     private var lastKeyframeRequest = Date.distantPast
     #if DEBUG
-    private var lastStats: (received: Int, decoded: Int, skipped: Int) = (0, 0, 0)
+    private var lastStats: (received: Int, decoded: Int, skipped: Int, failed: Int) = (0, 0, 0, 0)
     private var statsTicks = 0
     #endif
 
@@ -110,7 +110,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
         }
         pool.requestSession(
             with: host, viewport: viewport, audio: preferences.sound != .off, codec: codec, handler: self)
-        progress = "正在等待 \(host.name) 响应…"
+        progress = "等待响应…"
         healthTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkHealth() }
         }
@@ -170,7 +170,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
 
     func sessionAccepted(id: String, codec: Wire.VideoCodec) {
         sessionId = id
-        progress = "正在建立连接…"
+        progress = "建立连接…"
         for signal in outbox { pool.send(.rtcSignal(sessionId: id, signal: signal)) }
         outbox.removeAll()
         // The stream starts with whatever the panel says now.
@@ -222,7 +222,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
         case .localCandidate(let candidate):
             relay(.ice(candidate: candidate))
         case .connected:
-            progress = "正在等待画面…"
+            progress = "等待画面…"
             requestKeyframe()
         case .disconnected:
             Log.session.info("ICE disconnected")
@@ -251,7 +251,7 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
 
     private func checkHealth() {
         logStats()
-        let age = pipeline.mediaAge
+        let age = pipeline.pictureAge
         switch stage {
         case .connecting:
             if pipeline.hasPicture {
@@ -262,6 +262,10 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
         case .live:
             if age > Self.bannerAfter {
                 stage = .stalled(since: Date().addingTimeInterval(-age))
+                requestKeyframe()
+            } else if age > 1.5 {
+                // Host emits 5 fps keepalives even on a still desktop; >1.5 s
+                // without a decoded picture means the decoder lost sync.
                 requestKeyframe()
             }
         case .stalled:
@@ -280,17 +284,17 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
     /// Names the most likely cause, from what the signaling layer knows.
     private func attributeFailure(firstPicture: Bool) -> Ending {
         if !pool.isOnline {
-            return Ending(title: "服务器连接超时", message: "无法连接到自建的 Waystone 服务器，请检查服务器和网络。")
+            return Ending(title: "服务器连接超时", message: "无法连接服务器，请检查网络。")
         }
         if let current = pool.host(id: host.id), !current.online {
-            return Ending(title: "电脑已离线", message: "\(host.name) 当前已离线或休眠。")
+            return Ending(title: "主机已离线", message: "\(host.name) 已离线。")
         }
         if path.relayed {
-            return Ending(title: "中继连接超时", message: "经服务器中继的连接没有恢复，请检查服务器带宽。")
+            return Ending(title: "中继超时", message: "中继连接未恢复，请检查服务器网络。")
         }
         return firstPicture
-            ? Ending(title: "连接超时", message: "\(host.name) 在线，但画面没有送达。可能是网络阻断了直连。")
-            : Ending(title: "网络中断", message: "画面超过 \(Int(Self.giveUpAfter)) 秒没有恢复。")
+            ? Ending(title: "连接超时", message: "未收到画面，可能被网络阻断。")
+            : Ending(title: "网络中断", message: "画面中断超过 \(Int(Self.giveUpAfter)) 秒。")
     }
 
     private func end(_ ending: Ending) {
@@ -312,9 +316,9 @@ final class StreamSession: ObservableObject, Identifiable, SessionMessageHandler
         statsTicks += 1
         guard statsTicks % 4 == 0 else { return }
         let stats = pipeline.stats
-        let current = (stats.received, stats.decoder.decoded, stats.decoder.skipped)
+        let current = (stats.received, stats.decoder.decoded, stats.decoder.skipped, stats.decoder.failed)
         Log.media.info(
-            "per 2s: received \(current.0 - self.lastStats.received, privacy: .public), decoded \(current.1 - self.lastStats.decoded, privacy: .public), skipped \(current.2 - self.lastStats.skipped, privacy: .public)")
+            "per 2s: received \(current.0 - self.lastStats.received, privacy: .public), decoded \(current.1 - self.lastStats.decoded, privacy: .public), skipped \(current.2 - self.lastStats.skipped, privacy: .public), failed \(current.3 - self.lastStats.failed, privacy: .public)")
         lastStats = current
         #endif
     }

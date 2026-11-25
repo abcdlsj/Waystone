@@ -11,6 +11,7 @@ struct WaystoneApp: App {
             RootView()
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
+                .tint(WaystoneTheme.accent)
                 .onOpenURL { url in
                     // Pairing links are `waystone://pair?...`, so the Camera app
                     // and Safari hand them straight to the app.

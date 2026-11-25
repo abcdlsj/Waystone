@@ -15,9 +15,9 @@ struct FloatingBall: View {
 
         var color: Color {
             switch self {
-            case .good: return .green
-            case .degraded: return .yellow
-            case .stalled: return .orange
+            case .good: return WaystoneTheme.emerald
+            case .degraded: return WaystoneTheme.amber
+            case .stalled: return WaystoneTheme.coral
             }
         }
     }
@@ -46,41 +46,43 @@ struct FloatingBall: View {
                             let end = position(in: area)
                             trailing = end.x > area.width / 2
                             height = Double(min(max(end.y / area.height, 0.08), 0.92))
-                            withAnimation(.spring(duration: 0.3)) { drag = nil }
+                            withAnimation(.easeOut(duration: 0.16)) { drag = nil }
                         }
                 )
                 .simultaneousGesture(TapGesture().onEnded {
                     touched()
+                    Haptics.tap()
                     onTap()
                 })
         }
         .task(id: lastTouch) {
             try? await Task.sleep(for: .seconds(3))
-            withAnimation(.easeInOut(duration: 0.3)) { tucked = true }
+            withAnimation(.easeInOut(duration: 0.25)) { tucked = true }
         }
         .onAppear { pulse = true }
     }
 
     private var ball: some View {
         Circle()
-            .fill(.ultraThinMaterial)
-            .overlay(Circle().strokeBorder(.white.opacity(0.25)))
+            .fill(Color.black.opacity(0.88))
+            .overlay(Circle().strokeBorder(WaystoneTheme.borderStrong, lineWidth: 0.75))
             .overlay(
-                Image(systemName: "circle.grid.2x2.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(WaystoneTheme.textPrimary.opacity(0.92))
             )
             .overlay(alignment: .topTrailing) {
                 Circle()
                     .fill(health.color)
-                    .frame(width: 9, height: 9)
-                    .overlay(Circle().strokeBorder(.black.opacity(0.4), lineWidth: 1))
-                    .opacity(health == .good || pulse ? 1 : 0.35)
+                    .frame(width: 8, height: 8)
+                    .overlay(Circle().strokeBorder(Color.black, lineWidth: 1.5))
+                    .opacity(health == .good || pulse ? 1 : 0.30)
                     .animation(
-                        health == .good ? .default : .easeInOut(duration: 0.7).repeatForever(), value: pulse)
+                        health == .good ? .default : .easeInOut(duration: 0.75).repeatForever(autoreverses: true),
+                        value: pulse)
             }
             .frame(width: Self.size, height: Self.size)
-            .opacity(tucked && drag == nil ? 0.3 : 0.9)
+            .opacity(tucked && drag == nil ? 0.30 : 0.94)
             .contentShape(Circle().inset(by: -10))
             .accessibilityLabel("串流菜单")
             .accessibilityAddTraits(.isButton)
@@ -88,7 +90,7 @@ struct FloatingBall: View {
 
     private func position(in area: CGSize) -> CGPoint {
         let half = Self.size / 2
-        let inset: CGFloat = tucked && drag == nil ? -half / 2 : 6
+        let inset: CGFloat = tucked && drag == nil ? -half / 2 : 8
         var x = trailing ? area.width - half - inset : half + inset
         var y = area.height * height
         if let drag {
@@ -102,6 +104,6 @@ struct FloatingBall: View {
 
     private func touched() {
         lastTouch = Date()
-        withAnimation(.easeOut(duration: 0.15)) { tucked = false }
+        withAnimation(.easeOut(duration: 0.12)) { tucked = false }
     }
 }

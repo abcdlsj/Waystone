@@ -57,6 +57,7 @@
 		D239AE3F0F3A0BF91CCEF496 /* HotkeyPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32F6A6CE4D852549F38BA3EE /* HotkeyPreset.swift */; };
 		D2C1093AC0AA4831161E2876 /* InstanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A42FA2678160C8AD7D487DEB /* InstanceStore.swift */; };
 		D6F94FBAE61EE9875B0D643F /* VideoCodecSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 580217B55280168037D2AA74 /* VideoCodecSupport.swift */; };
+		E639D63A60DE5A295FD4309E /* WaystoneTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FC2E4105B3ABB77EA5A8B81 /* WaystoneTheme.swift */; };
 		F0BD0CCC7C326DC8BFAC2EA9 /* DevHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D6E942ABA123D269E42D850 /* DevHooks.swift */; };
 		F1F799E6F5F6A57073B93F7C /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF1D0543280564DF88F37F7 /* AppModel.swift */; };
 		F5CDA0E071D1042D1403D7A0 /* Transport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 105F63AB862A0B200C7FD861 /* Transport.swift */; };
@@ -113,6 +114,7 @@
 		78F4EC5F985454DEA3D45C8F /* VideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoder.swift; sourceTree = "<group>"; };
 		7950869B76B7DD6DB484E261 /* HotkeyLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyLayer.swift; sourceTree = "<group>"; };
 		7A6FE7286F91718F95A5CCCC /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
+		7FC2E4105B3ABB77EA5A8B81 /* WaystoneTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaystoneTheme.swift; sourceTree = "<group>"; };
 		81A7231A28CACD19B2B07EA3 /* SignalingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingClient.swift; sourceTree = "<group>"; };
 		81BEB2CFB7A6F8B1A14F6E3F /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		8510C078706589B0045E4824 /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
@@ -349,6 +351,7 @@
 			isa = PBXGroup;
 			children = (
 				5DDAA958F1396D323E200E5B /* Haptics.swift */,
+				7FC2E4105B3ABB77EA5A8B81 /* WaystoneTheme.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -536,6 +539,7 @@
 				CC952B7F06552354944A123B /* VideoDecoder.swift in Sources */,
 				9A1356972D844EBE3BB679C8 /* VideoView.swift in Sources */,
 				78FC99A56D437F2FC9FBB1F3 /* WaystoneApp.swift in Sources */,
+				E639D63A60DE5A295FD4309E /* WaystoneTheme.swift in Sources */,
 				299BCB36702E76278ECDA611 /* Wire.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

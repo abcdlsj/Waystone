@@ -48,7 +48,7 @@ private struct StreamContent: View {
             if case .stalled = session.stage {
                 StallBanner()
                     .frame(maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 8)
+                    .padding(.top, 12)
                     .allowsHitTesting(false)
             }
 
@@ -59,19 +59,24 @@ private struct StreamContent: View {
             }
 
             FloatingBall(health: health) {
-                withAnimation(.spring(duration: 0.25)) { panelOpen.toggle() }
+                withAnimation(.easeOut(duration: 0.14)) { panelOpen.toggle() }
             }
             .ignoresSafeArea()
 
             if panelOpen {
-                Color.black.opacity(0.25)
+                Color.black.opacity(0.58)
                     .ignoresSafeArea()
-                    .onTapGesture { withAnimation { panelOpen = false } }
+                    .transition(.opacity)
+                    .onTapGesture {
+                        withAnimation(.easeOut(duration: 0.12)) { panelOpen = false }
+                    }
                 ControlPanel(
                     session: session, input: input,
                     showKeyboard: { keyboard = true },
-                    close: { withAnimation { panelOpen = false } })
-                .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    close: {
+                        withAnimation(.easeOut(duration: 0.12)) { panelOpen = false }
+                    })
+                    .transition(.opacity)
             }
         }
         .statusBarHidden(true)
@@ -88,32 +93,42 @@ private struct StreamContent: View {
     }
 }
 
-/// A small ring that follows the remote cursor in trackpad mode, so the
-/// cursor moves under the finger before the video catches up.
+/// Precision reticle that tracks the remote cursor in trackpad mode so motion
+/// feels immediate before the encoded frame catches up.
 private struct LocalCursor: View {
     var position: CGPoint
 
     var body: some View {
-        Circle()
-            .strokeBorder(.white, lineWidth: 2)
-            .background(Circle().fill(.black.opacity(0.25)))
-            .frame(width: 18, height: 18)
-            .shadow(radius: 2)
-            .position(position)
-            .allowsHitTesting(false)
+        ZStack {
+            Circle()
+                .stroke(.black.opacity(0.75), lineWidth: 2.5)
+                .frame(width: 14, height: 14)
+            Circle()
+                .strokeBorder(.white.opacity(0.95), lineWidth: 1.25)
+                .background(Circle().fill(.black.opacity(0.18)))
+                .frame(width: 14, height: 14)
+            Circle()
+                .fill(.white)
+                .frame(width: 2.5, height: 2.5)
+        }
+        .position(position)
+        .allowsHitTesting(false)
     }
 }
 
 private struct StallBanner: View {
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
+            Circle()
+                .fill(WaystoneTheme.coral)
+                .frame(width: 5, height: 5)
             Text("网络波动，正在恢复画面…")
-                .font(.footnote.weight(.medium))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(WaystoneTheme.textPrimary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .consolePanel(cornerRadius: 6, opacity: 0.94)
         .transition(.move(edge: .top).combined(with: .opacity))
     }
 }
@@ -124,21 +139,45 @@ private struct ConnectingOverlay: View {
     var cancel: () -> Void
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "desktopcomputer")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
-            Text(host).font(.title3.weight(.semibold))
-            HStack(spacing: 8) {
-                ProgressView()
-                Text(progress).foregroundStyle(.secondary)
+        ZStack {
+            WaystoneTheme.canvas.ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text(host)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(WaystoneTheme.textPrimary)
+                    .lineLimit(1)
+
+                ConsoleProgressBar()
+
+                HStack(alignment: .center) {
+                    Text(progress)
+                        .font(.system(size: 12, weight: .regular, design: .monospaced))
+                        .foregroundStyle(WaystoneTheme.textSecondary)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 12)
+
+                    Button {
+                        Haptics.tap()
+                        cancel()
+                    } label: {
+                        Text("取消")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(WaystoneTheme.textSecondary)
+                            .padding(.horizontal, 14)
+                            .frame(height: 30)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(WaystoneTheme.border, lineWidth: 0.75)
+                            )
+                    }
+                    .buttonStyle(ConsoleButtonStyle())
+                }
             }
-            Button("取消", action: cancel)
-                .buttonStyle(.bordered)
-                .padding(.top, 8)
+            .frame(maxWidth: 320)
+            .padding(.horizontal, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
         .accessibilityIdentifier("connecting")
     }
 }
