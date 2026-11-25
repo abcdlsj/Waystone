@@ -114,7 +114,9 @@ impl Session {
             }
         });
 
-        let mut config = EngineConfig::new(Role::Host, sink).with_video_codec(request.codec);
+        let mut config = EngineConfig::new(Role::Host, sink)
+            .with_video_codec(request.codec)
+            .with_port_mapping(true);
         if let Some(stun) = stun.and_then(resolve) {
             config = config.with_stun(stun);
         }

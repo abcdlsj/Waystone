@@ -13,12 +13,16 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use waystone_proto::Viewport;
 use waystone_rtc::engine::{sink, Engine, EngineConfig, Event, Role, SessionOptions};
 
-/// Starts an engine whose events are forwarded into a channel.
-async fn start(role: Role, relayed_events: UnboundedSender<Event>) -> Engine {
+/// Starts an engine whose events are forwarded into a channel. Without
+/// `bind` the engine uses its default sockets (IPv4 and IPv6 wildcards).
+async fn start(role: Role, relayed_events: UnboundedSender<Event>, bind: Option<&str>) -> Engine {
     let sink = sink(move |event: Event| {
         let _ = relayed_events.send(event);
     });
-    let mut config = EngineConfig::new(role, sink).with_bind("127.0.0.1:0".parse().unwrap());
+    let mut config = EngineConfig::new(role, sink);
+    if let Some(bind) = bind {
+        config = config.with_bind(bind.parse().unwrap());
+    }
     if role == Role::Controller {
         config = config.with_session(SessionOptions::new(
             Viewport {
@@ -59,8 +63,8 @@ async fn session_negotiates_and_carries_media() {
     let (controller_tx, mut controller_events) = unbounded_channel();
     let (host_tx, mut host_events) = unbounded_channel();
 
-    let controller = start(Role::Controller, controller_tx).await;
-    let host = start(Role::Host, host_tx).await;
+    let controller = start(Role::Controller, controller_tx, Some("127.0.0.1:0")).await;
+    let host = start(Role::Host, host_tx, Some("127.0.0.1:0")).await;
 
     controller.offer();
 
@@ -182,12 +186,12 @@ async fn session_negotiates_and_carries_media() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn input_channel_reaches_the_host() {
+async fn input_channel_reaches_the_host_with_default_sockets() {
     let (controller_tx, mut controller_events) = unbounded_channel();
     let (host_tx, mut host_events) = unbounded_channel();
 
-    let controller = start(Role::Controller, controller_tx).await;
-    let host = start(Role::Host, host_tx).await;
+    let controller = start(Role::Controller, controller_tx, None).await;
+    let host = start(Role::Host, host_tx, None).await;
 
     controller.offer();
     let Event::LocalOffer(offer) = wait_for(&mut controller_events, "offer", |event| {

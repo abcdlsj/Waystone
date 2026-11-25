@@ -152,6 +152,9 @@ pub struct EngineConfig {
     pub stun: Option<SocketAddr>,
     pub turn: Option<TurnConfig>,
     /// Local address to bind, `0.0.0.0:0` by default.
+    ///
+    /// Without one the engine also opens an IPv6 socket, so peers that both
+    /// have a global IPv6 address can connect without NAT traversal.
     pub bind: Option<SocketAddr>,
     /// Codec the host encodes and the controller expects.
     pub video_codec: VideoCodec,
@@ -160,6 +163,13 @@ pub struct EngineConfig {
     /// Useful behind NATs that break hole punching (and for tests); requires
     /// [`EngineConfig::turn`].
     pub relay_only: bool,
+    /// Ask the router to forward a public port to the engine (UPnP IGD, PCP
+    /// or NAT-PMP) and advertise it as a server reflexive candidate.
+    ///
+    /// Meant for the host: it makes the host reachable from behind a NAT that
+    /// cannot be hole punched (a phone on cellular, typically). Needs the
+    /// `port-mapping` feature; ignored without it.
+    pub port_mapping: bool,
     pub sink: EventSink,
 }
 
@@ -173,6 +183,7 @@ impl EngineConfig {
             bind: None,
             video_codec: VideoCodec::H265,
             relay_only: false,
+            port_mapping: false,
             sink,
         }
     }
@@ -205,6 +216,12 @@ impl EngineConfig {
     /// Only gathers and advertises the TURN relay candidate.
     pub fn with_relay_only(mut self, relay_only: bool) -> Self {
         self.relay_only = relay_only;
+        self
+    }
+
+    /// Requests a router port mapping, see [`EngineConfig::port_mapping`].
+    pub fn with_port_mapping(mut self, port_mapping: bool) -> Self {
+        self.port_mapping = port_mapping;
         self
     }
 }
@@ -284,13 +301,24 @@ impl Engine {
             warn!("cannot report datagram destinations: {error}");
         }
         let local_addr = socket.local_addr()?;
+        let socket6 = if config.bind.is_none() && !config.relay_only {
+            match bind_ipv6() {
+                Ok(socket) => Some(socket),
+                Err(error) => {
+                    debug!("no IPv6 socket: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let (tx, rx) = unbounded_channel();
         let (media, media_rx) = mpsc::channel(MEDIA_QUEUE);
         let (stopped_tx, stopped) = watch::channel(false);
         let video = Arc::new(VideoQueue::default());
         let queue = video.clone();
         tokio::spawn(async move {
-            let mut driver = Driver::new(config, socket, rx, media_rx, queue, local_addr);
+            let mut driver = Driver::new(config, socket, socket6, rx, media_rx, queue, local_addr);
             driver.run().await;
             let _ = stopped_tx.send(true);
         });
@@ -397,6 +425,8 @@ const REFLEXIVE_RTO: Duration = Duration::from_millis(250);
 struct Driver {
     config: EngineConfig,
     socket: UdpSocket,
+    /// The IPv6 socket next to the default `0.0.0.0` one, with its address.
+    socket6: Option<(UdpSocket, SocketAddr)>,
     rx: UnboundedReceiver<Command>,
     media_rx: mpsc::Receiver<Media>,
     video: Arc<VideoQueue>,
@@ -425,14 +455,20 @@ struct Driver {
     video_bitrate: u32,
     /// Dropped frames, so the warning is logged a bounded number of times.
     video_drop_logged: u64,
+    /// Result of the router port mapping, while it is being requested.
+    mapping: Option<tokio::sync::oneshot::Receiver<Option<(SocketAddr, SocketAddr)>>>,
+    /// Dropping this releases the router port mapping.
+    _mapping_lease: Option<tokio::sync::oneshot::Sender<()>>,
     connected: bool,
     closed: bool,
 }
 
 impl Driver {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config: EngineConfig,
         socket: UdpSocket,
+        socket6: Option<UdpSocket>,
         rx: UnboundedReceiver<Command>,
         media_rx: mpsc::Receiver<Media>,
         video: Arc<VideoQueue>,
@@ -468,6 +504,10 @@ impl Driver {
             rtc: rtc_config.build(Instant::now()),
             config,
             socket,
+            socket6: socket6.and_then(|socket| {
+                let address = socket.local_addr().ok()?;
+                Some((socket, address))
+            }),
             rx,
             media_rx,
             video,
@@ -488,6 +528,8 @@ impl Driver {
             bwe_enabled,
             video_bitrate,
             video_drop_logged: 0,
+            mapping: None,
+            _mapping_lease: None,
             connected: false,
             closed: false,
         }
@@ -498,6 +540,7 @@ impl Driver {
         self.declare_local_media();
 
         let mut buf = vec![0u8; 2048];
+        let mut buf6 = vec![0u8; 2048];
         loop {
             if self.closed {
                 break;
@@ -521,7 +564,8 @@ impl Driver {
                 received = crate::net::recv_with_destination(&self.socket, &mut buf) => match received {
                     Ok(datagram) => {
                         let len = datagram.len;
-                        self.handle_datagram(&buf[..len], datagram.source, datagram.destination);
+                        let local = self.local_addr;
+                        self.handle_datagram(&buf[..len], datagram.source, datagram.destination, local);
                     }
                     Err(error) if is_transient(&error) => {
                         // An ICMP error from an earlier send (a dead candidate
@@ -533,6 +577,27 @@ impl Driver {
                         break;
                     }
                 },
+                received = recv_optional(self.socket6.as_ref(), &mut buf6) => match received {
+                    Ok((datagram, local)) => {
+                        let len = datagram.len;
+                        self.handle_datagram(&buf6[..len], datagram.source, datagram.destination, local);
+                    }
+                    Err(error) if is_transient(&error) => debug!("ipv6 socket read failed: {error}"),
+                    Err(error) => {
+                        // The IPv4 socket still carries the session.
+                        warn!("ipv6 socket read failed, closing it: {error}");
+                        self.socket6 = None;
+                    }
+                },
+                mapped = wait_mapping(&mut self.mapping) => {
+                    self.mapping = None;
+                    if let Some((external, base)) = mapped {
+                        match Candidate::server_reflexive(external, base, "udp") {
+                            Ok(candidate) => self.add_local_candidate(candidate),
+                            Err(error) => warn!("mapped candidate rejected: {error}"),
+                        }
+                    }
+                }
                 _ = &mut sleep => self.handle_timeout(Instant::now()),
             }
         }
@@ -562,7 +627,7 @@ impl Driver {
                     probe.rto *= 2;
                     probe.next_send = now + probe.rto;
                     let (request, server) = (probe.request.clone(), probe.server);
-                    if let Err(error) = self.socket.try_send_to(&request, server) {
+                    if let Err(error) = self.socket_for(server).try_send_to(&request, server) {
                         debug!("stun request to {server} failed: {error}");
                     }
                 }
@@ -622,7 +687,7 @@ impl Driver {
                 match turn.encapsulate(destination, payload) {
                     Some(frame) => {
                         let server = turn.server();
-                        if let Err(error) = self.socket.send_to(&frame, server).await {
+                        if let Err(error) = self.socket_for(server).send_to(&frame, server).await {
                             debug!("send to turn server {server} failed: {error}");
                         }
                     }
@@ -639,8 +704,21 @@ impl Driver {
             }
         }
 
-        if let Err(error) = self.socket.send_to(payload, destination).await {
+        if let Err(error) = self
+            .socket_for(destination)
+            .send_to(payload, destination)
+            .await
+        {
             debug!("send to {destination} failed: {error}");
+        }
+    }
+
+    /// The socket that can reach `destination`: the IPv6 one when there is
+    /// one and the destination is IPv6, the bound socket otherwise.
+    fn socket_for(&self, destination: SocketAddr) -> &UdpSocket {
+        match &self.socket6 {
+            Some((socket, _)) if destination.is_ipv6() => socket,
+            _ => &self.socket,
         }
     }
 
@@ -650,8 +728,12 @@ impl Driver {
             return;
         };
         let server = turn.server();
+        let socket = match &self.socket6 {
+            Some((socket, _)) if server.is_ipv6() => socket,
+            _ => &self.socket,
+        };
         while let Some(datagram) = turn.poll_transmit() {
-            if let Err(error) = self.socket.send_to(&datagram, server).await {
+            if let Err(error) = socket.send_to(&datagram, server).await {
                 debug!("send to turn server {server} failed: {error}");
             }
         }
@@ -721,7 +803,14 @@ impl Driver {
         });
     }
 
-    fn handle_datagram(&mut self, datagram: &[u8], from: SocketAddr, destination: Option<IpAddr>) {
+    /// Handles one datagram that arrived on the socket bound to `local`.
+    fn handle_datagram(
+        &mut self,
+        datagram: &[u8],
+        from: SocketAddr,
+        destination: Option<IpAddr>,
+        local: SocketAddr,
+    ) {
         let now = Instant::now();
         if self.handle_reflexive_response(datagram, from) {
             return;
@@ -745,7 +834,7 @@ impl Driver {
             }
         }
 
-        match self.resolve_destination(from, destination) {
+        match self.resolve_destination(from, destination, local) {
             Some(destination) => self.feed(datagram, from, destination),
             None => debug!("dropping datagram from {from}: unknown destination"),
         }
@@ -760,13 +849,14 @@ impl Driver {
         &mut self,
         from: SocketAddr,
         reported: Option<IpAddr>,
+        local: SocketAddr,
     ) -> Option<SocketAddr> {
-        let port = self.local_addr.port();
+        let port = local.port();
         if let Some(ip) = reported.filter(|ip| !ip.is_unspecified()) {
             return Some(SocketAddr::new(ip, port));
         }
-        if !self.local_addr.ip().is_unspecified() {
-            return Some(self.local_addr);
+        if !local.ip().is_unspecified() {
+            return Some(local);
         }
         if let Some(ip) = self.routes.get(&from) {
             return Some(SocketAddr::new(*ip, port));
@@ -803,18 +893,31 @@ impl Driver {
             // candidates. A socket bound to `0.0.0.0` cannot send to an IPv6
             // address at all, so the candidate family follows the socket:
             // otherwise every IPv6 host candidate is a guaranteed dead pair.
-            let ips = if self.local_addr.ip().is_unspecified() {
+            let interfaces = if self.local_addr.ip().is_unspecified() {
                 local_ips()
-                    .into_iter()
-                    .filter(|ip| ip.is_ipv4() == self.local_addr.is_ipv4())
-                    .collect()
             } else {
                 vec![self.local_addr.ip()]
             };
-            for ip in ips {
+            let port6 = self.socket6.as_ref().map(|(_, address)| address.port());
+            for ip in interfaces {
+                // IPv6 addresses go through the IPv6 socket, and only when it
+                // exists; loopback and site addresses never leave the LAN, so
+                // only global ones are worth a candidate there.
+                let port = match ip {
+                    _ if ip.is_ipv4() == self.local_addr.is_ipv4() => port,
+                    IpAddr::V6(v6) if is_global_v6(v6) => match port6 {
+                        Some(port) => port,
+                        None => continue,
+                    },
+                    _ => continue,
+                };
                 if let Ok(candidate) = Candidate::host(SocketAddr::new(ip, port), "udp") {
                     self.add_local_candidate(candidate);
                 }
+            }
+
+            if self.config.port_mapping {
+                self.start_port_mapping();
             }
 
             if let Some(server) = self.config.stun {
@@ -844,6 +947,31 @@ impl Driver {
             ));
             self.flush_turn().await;
         }
+    }
+
+    /// Asks the router for a port mapping in the background; the candidate is
+    /// trickled when it arrives. The lease lives until the driver is dropped.
+    #[cfg(feature = "port-mapping")]
+    fn start_port_mapping(&mut self) {
+        let interfaces = mapping_interfaces(self.config.stun);
+        if interfaces.is_empty() {
+            return;
+        }
+        let (result, mapping) = tokio::sync::oneshot::channel();
+        let (lease, released) = tokio::sync::oneshot::channel();
+        self.mapping = Some(mapping);
+        self._mapping_lease = Some(lease);
+        tokio::spawn(crate::portmap::hold(
+            interfaces,
+            self.local_addr.port(),
+            result,
+            released,
+        ));
+    }
+
+    #[cfg(not(feature = "port-mapping"))]
+    fn start_port_mapping(&mut self) {
+        warn!("port mapping requested, but waystone-rtc was built without it");
     }
 
     /// Consumes the answer to the reflexive probe. Returns true when it was one.
@@ -1298,6 +1426,81 @@ fn route_ip(remote: IpAddr) -> Option<IpAddr> {
     (!ip.is_unspecified()).then_some(ip)
 }
 
+/// Private IPv4 addresses a router could forward to, the one routing to
+/// `stun` (or any public address) first.
+///
+/// The route alone is not enough: with a VPN or a proxy's TUN device the
+/// default route points into the tunnel, whose address no router knows.
+#[cfg(feature = "port-mapping")]
+pub(crate) fn mapping_interfaces(stun: Option<SocketAddr>) -> Vec<std::net::Ipv4Addr> {
+    let private = |ip: &IpAddr| match ip {
+        IpAddr::V4(v4) if v4.is_private() => Some(*v4),
+        _ => None,
+    };
+    let probe = stun.map_or(IpAddr::from([223, 5, 5, 5]), |server| server.ip());
+    let mut interfaces: Vec<_> = route_ip(probe)
+        .as_ref()
+        .and_then(private)
+        .into_iter()
+        .collect();
+    for ip in local_ips().iter().filter_map(private) {
+        if !interfaces.contains(&ip) {
+            interfaces.push(ip);
+        }
+    }
+    interfaces
+}
+
+/// Opens the IPv6-only socket that complements the default IPv4 one.
+///
+/// `IPV6_V6ONLY` is set explicitly because the default differs per platform
+/// (off on Linux and macOS, on for Windows): a dual-stack socket would also
+/// receive IPv4 traffic as mapped addresses nobody advertised.
+fn bind_ipv6() -> std::io::Result<UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.set_only_v6(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::from(([0u16; 8], 0)).into())?;
+    let socket = UdpSocket::from_std(socket.into())?;
+    if let Err(error) = crate::net::enable_destination_info(&socket) {
+        debug!("cannot report IPv6 datagram destinations: {error}");
+    }
+    Ok(socket)
+}
+
+/// Global unicast IPv6 (`2000::/3`), the only kind a remote peer can reach.
+fn is_global_v6(ip: std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xe000) == 0x2000
+}
+
+/// Receives from the IPv6 socket, or waits forever when there is none.
+async fn recv_optional(
+    socket: Option<&(UdpSocket, SocketAddr)>,
+    buffer: &mut [u8],
+) -> std::io::Result<(crate::net::Datagram, SocketAddr)> {
+    match socket {
+        Some((socket, local)) => {
+            let datagram = crate::net::recv_with_destination(socket, buffer).await?;
+            Ok((datagram, *local))
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Waits for the port mapping result, or forever when none is pending.
+async fn wait_mapping(
+    pending: &mut Option<tokio::sync::oneshot::Receiver<Option<(SocketAddr, SocketAddr)>>>,
+) -> Option<(SocketAddr, SocketAddr)> {
+    match pending {
+        Some(receiver) => receiver.await.ok().flatten(),
+        None => std::future::pending().await,
+    }
+}
+
 /// Read errors caused by an earlier send rather than a broken socket.
 fn is_transient(error: &std::io::Error) -> bool {
     matches!(
@@ -1333,6 +1536,14 @@ mod tests {
             route_ip("127.0.0.1".parse().unwrap()),
             Some("127.0.0.1".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn only_global_ipv6_is_advertised() {
+        assert!(is_global_v6("2408:8207:1850::1".parse().unwrap()));
+        assert!(!is_global_v6("fd00::1".parse().unwrap()));
+        assert!(!is_global_v6("fe80::1".parse().unwrap()));
+        assert!(!is_global_v6("::1".parse().unwrap()));
     }
 
     #[test]

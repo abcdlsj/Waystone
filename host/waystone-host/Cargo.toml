@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 waystone-proto = { path = "../../crates/waystone-proto" }
-waystone-rtc = { path = "../../crates/waystone-rtc" }
+waystone-rtc = { path = "../../crates/waystone-rtc", features = ["port-mapping"] }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }

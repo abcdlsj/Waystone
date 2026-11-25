@@ -23,10 +23,17 @@ sha1 = "0.10"
 md-5 = "0.10"
 crc32fast = "1"
 if-addrs = "0.15"
+socket2 = "0.6"
+crab_nat = { version = "0.8", optional = true }
 tokio = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+# Router port mappings (UPnP IGD, PCP, NAT-PMP) for hosts. Off for iOS, where
+# multicast needs an entitlement and a phone is never the side to map.
+port-mapping = ["dep:crab_nat"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

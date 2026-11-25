@@ -13,6 +13,8 @@
 pub mod engine;
 pub mod ffi;
 pub mod net;
+#[cfg(feature = "port-mapping")]
+mod portmap;
 pub mod stun;
 pub mod turn;
 
