@@ -145,10 +145,15 @@ final class AppModel: ObservableObject {
 
     #if DEBUG
     /// Starts a stream with the first online host, for unattended runs.
-    func autoConnect() {
+    /// Streams the first free host, or the first whose name contains
+    /// `named` (case-insensitive) when given.
+    func autoConnect(named: String? = nil) {
         guard session == nil else { return }
         for pool in pools where pool.isOnline {
-            if let host = pool.hosts.first(where: { $0.online && !$0.busy }) {
+            let match = { (host: Host) in
+                named.map { host.name.localizedCaseInsensitiveContains($0) } ?? true
+            }
+            if let host = pool.hosts.first(where: { $0.online && !$0.busy && match($0) }) {
                 connect(to: host, in: pool)
                 return
             }

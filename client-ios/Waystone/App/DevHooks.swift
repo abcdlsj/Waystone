@@ -8,7 +8,8 @@ import Foundation
 ///   file `Application Support/Waystone/pair.txt` copied in with `devicectl`,
 ///   pairs on launch when no server is enrolled yet;
 /// * `WAYSTONE_AUTO_CONNECT=1`, or a second line `connect` in that file, keeps
-///   starting a stream with the first online host.
+///   starting a stream with the first online host; any other value than `1`
+///   picks the host whose name contains it.
 enum DevHooks {
     @MainActor
     static func run(_ model: AppModel) {
@@ -19,10 +20,12 @@ enum DevHooks {
             Log.app.info("pairing from an injected link")
             model.pair(with: uri)
         }
-        guard environment["WAYSTONE_AUTO_CONNECT"] != nil || inbox?.autoConnect == true else { return }
+        let target = environment["WAYSTONE_AUTO_CONNECT"]
+        guard target != nil || inbox?.autoConnect == true else { return }
+        let name = target.flatMap { $0 == "1" ? nil : $0 }
         Task { @MainActor in
             while !Task.isCancelled {
-                model.autoConnect()
+                model.autoConnect(named: name)
                 try? await Task.sleep(for: .seconds(2))
             }
         }
